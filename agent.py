@@ -374,7 +374,7 @@ def get_session():
                 "X-CAP-API-KEY": API_KEY
             },
             json={
-                "identifier": API_KEY,
+                "identifier": os.environ.get("CAPITAL_IDENTIFIER", ""),
                 "password": API_PASSWORD
             },
             timeout=10
