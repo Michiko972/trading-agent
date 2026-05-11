@@ -208,7 +208,7 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 
     log.info(f"""
     ══════════════════════════════════
-    ORDRE {direction.upper()} — {EPIC}
+    ORDRE {direction.upper()} — {epic}
     Entrée   : {entry_price:.2f}
     Stop     : {stop_price:.2f}
     TP1      : {tp1:.2f} (×{TP1_RATIO})
@@ -245,12 +245,12 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         return False
 
 
-def close_all_positions():
+def close_all_positions(epic=DEFAULT_EPIC):
     try:
         r = requests.get(f"{API_URL}/positions", headers=get_headers(), timeout=10)
         if r.status_code == 200:
             for pos in r.json().get("positions", []):
-                if pos["market"]["epic"] == EPIC:
+                if pos["market"]["epic"] == epic:
                     deal_id = pos["position"]["dealId"]
                     cr = requests.delete(f"{API_URL}/positions/{deal_id}", headers=get_headers(), timeout=10)
                     if cr.status_code == 200:
@@ -375,4 +375,3 @@ if __name__ == "__main__":
     log.info("=" * 50)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
