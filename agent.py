@@ -17,7 +17,8 @@ from flask import Flask, request, jsonify
 API_KEY      = os.environ.get("CAPITAL_API_KEY", "")
 API_PASSWORD = os.environ.get("CAPITAL_API_PASSWORD", "")
 API_URL      = "https://demo-api-capital.backend-capital.com/api/v1"
-EPIC         = "BTCUSD"
+# EPIC défini dynamiquement depuis le signal TradingView
+DEFAULT_EPIC = "BTCUSD"
 
 CAPITAL_DEMO     = 1000.0
 RISK_PCT         = 0.01
@@ -215,7 +216,7 @@ def calculate_position_size(entry_price, stop_price):
     return max(0.0001, size)
 
 
-def open_position(direction, entry_price, stop_price):
+def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
     size = calculate_position_size(entry_price, stop_price)
     dist = abs(entry_price - stop_price)
 
@@ -240,7 +241,7 @@ def open_position(direction, entry_price, stop_price):
 
     try:
         payload = {
-            "epic": EPIC,
+            "epic": epic,
             "direction": "BUY" if direction == "long" else "SELL",
             "size": size,
             "guaranteedStop": False,
@@ -325,9 +326,11 @@ def webhook():
             signal = data.get("signal")
             price  = float(data.get("price", 0))
             stop   = calculate_stop(signal, price, data)
+            # Symbole dynamique depuis l'alerte TradingView
+            epic   = data.get("epic", DEFAULT_EPIC)
 
             if price and stop:
-                success = open_position(signal, price, stop)
+                success = open_position(signal, price, stop, epic)
                 return jsonify({
                     "status": "trade_opened" if success else "order_failed",
                     "direction": signal,
