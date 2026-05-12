@@ -17,6 +17,8 @@ from flask import Flask, request, jsonify
 API_KEY      = os.environ.get("CAPITAL_API_KEY", "")
 API_PASSWORD = os.environ.get("CAPITAL_API_PASSWORD", "")
 API_EMAIL    = os.environ.get("CAPITAL_EMAIL", "")
+CAPITAL_LOGIN    = os.environ.get("CAPITAL_LOGIN", "")
+CAPITAL_PASSWORD = os.environ.get("CAPITAL_PASSWORD", "")
 API_URL      = "https://demo-api-capital.backend-capital.com/api/v1"
 # EPIC défini dynamiquement depuis le signal TradingView
 DEFAULT_EPIC = "BTCUSD"
@@ -161,15 +163,32 @@ engine = TradingDecisionEngine()
 # ══════════════════════════════════════════════
 def get_session():
     try:
-        r = requests.post(
-            f"{API_URL}/session",
-            headers={"X-CAP-API-KEY": API_KEY, "Content-Type": "application/json"},
-            json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False},
-            timeout=10
-        )
-        if r.status_code == 200:
-            return r.headers.get("CST"), r.headers.get("X-SECURITY-TOKEN")
-        log.error(f"Session error: {r.text}")
+        # Essai 1 — avec clé API
+        if API_KEY and API_EMAIL:
+            r = requests.post(
+                f"{API_URL}/session",
+                headers={"X-CAP-API-KEY": API_KEY, "Content-Type": "application/json"},
+                json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False},
+                timeout=10
+            )
+            if r.status_code == 200:
+                log.info("Session ouverte avec clé API")
+                return r.headers.get("CST"), r.headers.get("X-SECURITY-TOKEN")
+            log.warning(f"Clé API échouée: {r.text} — tentative sans clé API")
+
+        # Essai 2 — sans clé API (login + password direct)
+        if CAPITAL_LOGIN and CAPITAL_PASSWORD:
+            r = requests.post(
+                f"{API_URL}/session",
+                headers={"Content-Type": "application/json"},
+                json={"identifier": CAPITAL_LOGIN, "password": CAPITAL_PASSWORD, "encryptedPassword": False},
+                timeout=10
+            )
+            if r.status_code == 200:
+                log.info("Session ouverte avec login/password")
+                return r.headers.get("CST"), r.headers.get("X-SECURITY-TOKEN")
+            log.error(f"Session error: {r.text}")
+
         return None, None
     except Exception as e:
         log.error(f"Session exception: {e}")
