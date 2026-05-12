@@ -1,14 +1,21 @@
 """
-Agent de Trading Automatique v2
+Agent de Trading Automatique v2.2
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
-Version corrigée — API officielle uniquement
+
+Version :
+- Script stable conservé
+- Une seule position
+- TP fixe
+- SL fixe
+- Fermeture anticipée sur grande mèche retournement
 """
 
 import os
 import json
 import logging
 import requests
+
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
@@ -26,6 +33,7 @@ DEFAULT_EPIC = "BTCUSD"
 
 CAPITAL_DEMO = 1000.0
 RISK_PCT = 0.01
+
 DAILY_LOSS_LIMIT = 0.02
 MAX_DRAWDOWN_PCT = 0.04
 PROFIT_TARGET = 0.06
@@ -49,6 +57,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Vérification variables Railway
+
 log.info(f"API KEY loaded: {'YES' if API_KEY else 'NO'}")
 log.info(f"EMAIL loaded: {'YES' if API_EMAIL else 'NO'}")
 log.info(f"PASSWORD loaded: {'YES' if API_PASSWORD else 'NO'}")
@@ -134,7 +143,6 @@ class AccountState:
             f"Total: {self.total_pnl:+.2f}€"
         )
 
-
 state = AccountState()
 
 # ══════════════════════════════════════════════
@@ -192,7 +200,6 @@ class TradingDecisionEngine:
 
         return True, "entry_validated", score, "Setup validé"
 
-
 engine = TradingDecisionEngine()
 
 # ══════════════════════════════════════════════
@@ -202,7 +209,9 @@ engine = TradingDecisionEngine()
 def get_session():
 
     if not API_KEY or not API_EMAIL or not API_PASSWORD:
+
         log.error("Variables API manquantes")
+
         return None, None
 
     try:
@@ -222,18 +231,22 @@ def get_session():
         )
 
         if response.status_code != 200:
+
             log.error(
                 f"Erreur session API | "
                 f"Code: {response.status_code} | "
                 f"Réponse: {response.text}"
             )
+
             return None, None
 
         cst = response.headers.get("CST")
         xst = response.headers.get("X-SECURITY-TOKEN")
 
         if not cst or not xst:
+
             log.error("Tokens session manquants")
+
             return None, None
 
         log.info("Session API ouverte avec succès")
@@ -246,13 +259,14 @@ def get_session():
 
         return None, None
 
-
 def get_headers():
 
     cst, xst = get_session()
 
     if not cst or not xst:
+
         log.error("Session invalide")
+
         return None
 
     return {
@@ -306,6 +320,55 @@ def calculate_stop(signal, price, data):
         return price * (1 + atr_pct)
 
 # ══════════════════════════════════════════════
+# DÉTECTION MÈCHE RETOURNEMENT
+# ══════════════════════════════════════════════
+
+def detect_reversal_wick(data):
+
+    signal = data.get("signal", "")
+
+    open_price = float(data.get("open", 0))
+    close_price = float(data.get("close", 0))
+    high_price = float(data.get("high", 0))
+    low_price = float(data.get("low", 0))
+
+    candle_size = high_price - low_price
+
+    if candle_size <= 0:
+        return False
+
+    upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
+
+    upper_ratio = upper_wick / candle_size
+    lower_ratio = lower_wick / candle_size
+
+    bearish_candle = close_price < open_price
+    bullish_candle = close_price > open_price
+
+    # LONG → rejet par le haut
+
+    if signal == "long":
+
+        if upper_ratio >= 0.6 and bearish_candle:
+
+            log.info("Mèche haute retournement détectée")
+
+            return True
+
+    # SHORT → rejet par le bas
+
+    if signal == "short":
+
+        if lower_ratio >= 0.6 and bullish_candle:
+
+            log.info("Mèche basse retournement détectée")
+
+            return True
+
+    return False
+
+# ══════════════════════════════════════════════
 # OUVERTURE POSITION
 # ══════════════════════════════════════════════
 
@@ -323,12 +386,10 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
     if direction == "long":
 
         tp1 = entry_price + dist * TP1_RATIO
-        tp2 = entry_price + dist * TP2_RATIO
 
     else:
 
         tp1 = entry_price - dist * TP1_RATIO
-        tp2 = entry_price - dist * TP2_RATIO
 
     payload = {
         "epic": epic,
@@ -368,7 +429,6 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         state.stop_loss = stop_price
 
         state.take_profit1 = tp1
-        state.take_profit2 = tp2
 
         log.info(f"Position ouverte avec succès | Deal: {deal_id}")
 
@@ -453,6 +513,18 @@ def webhook():
         data = request.get_json(force=True)
 
         log.info(f"Signal reçu: {json.dumps(data)}")
+
+        # Fermeture anticipée sur retournement
+
+        if state.position_open:
+
+            if detect_reversal_wick(data):
+
+                close_all_positions()
+
+                return jsonify({
+                    "status": "position_closed_reversal"
+                }), 200
 
         can_trade, reason = state.can_trade()
 
@@ -546,7 +618,7 @@ def home():
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "2.1"
+        "version": "2.2"
     }), 200
 
 # ══════════════════════════════════════════════
