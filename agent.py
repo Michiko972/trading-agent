@@ -1,14 +1,14 @@
 """
-Agent de Trading Automatique v3.1
+Agent de Trading Automatique v3.2
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
 
 Version :
 - API officielle uniquement
 - Synchronisation réelle des positions
-- TP partiel 50 %
-- Runner TP2
-- Sans break-even automatique
+- TP1 = 70%
+- Runner TP2 = 30%
+- Ignore automatiquement TP2 si taille trop petite
 """
 
 import os
@@ -45,6 +45,8 @@ PROFIT_TARGET = 0.06
 
 TP1_RATIO = 1.5
 TP2_RATIO = 3.0
+
+MIN_RUNNER_SIZE = 0.01
 
 # ══════════════════════════════════════════════
 # LOGGING
@@ -374,7 +376,8 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 
     total_size = calculate_position_size(entry_price, stop_price)
 
-    half_size = round(total_size / 2, 4)
+    tp1_size = round(total_size * 0.7, 4)
+    tp2_size = round(total_size * 0.3, 4)
 
     dist = abs(entry_price - stop_price)
 
@@ -390,29 +393,18 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 
     direction_api = "BUY" if direction == "long" else "SELL"
 
-    # TP1 POSITION
-
-    payload_tp1 = {
-        "epic": epic,
-        "direction": direction_api,
-        "size": half_size,
-        "guaranteedStop": False,
-        "stopLevel": round(stop_price, 2),
-        "profitLevel": round(tp1, 2)
-    }
-
-    # TP2 RUNNER
-
-    payload_tp2 = {
-        "epic": epic,
-        "direction": direction_api,
-        "size": half_size,
-        "guaranteedStop": False,
-        "stopLevel": round(stop_price, 2),
-        "profitLevel": round(tp2, 2)
-    }
-
     try:
+
+        # TP1 — 70%
+
+        payload_tp1 = {
+            "epic": epic,
+            "direction": direction_api,
+            "size": tp1_size,
+            "guaranteedStop": False,
+            "stopLevel": round(stop_price, 2),
+            "profitLevel": round(tp1, 2)
+        }
 
         response1 = requests.post(
             f"{API_URL}/positions",
@@ -431,26 +423,45 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 
             return False
 
-        log.info("TP1 ouvert avec succès")
+        log.info(f"TP1 ouvert | 70% | Size: {tp1_size}")
 
-        response2 = requests.post(
-            f"{API_URL}/positions",
-            headers=headers,
-            json=payload_tp2,
-            timeout=10
-        )
+        # TP2 — 30%
 
-        if response2.status_code != 200:
+        if tp2_size >= MIN_RUNNER_SIZE:
 
-            log.error(
-                f"Erreur ouverture TP2 | "
-                f"{response2.status_code} | "
-                f"{response2.text}"
+            payload_tp2 = {
+                "epic": epic,
+                "direction": direction_api,
+                "size": tp2_size,
+                "guaranteedStop": False,
+                "stopLevel": round(stop_price, 2),
+                "profitLevel": round(tp2, 2)
+            }
+
+            response2 = requests.post(
+                f"{API_URL}/positions",
+                headers=headers,
+                json=payload_tp2,
+                timeout=10
             )
 
-            return False
+            if response2.status_code != 200:
 
-        log.info("TP2 runner ouvert avec succès")
+                log.error(
+                    f"Erreur ouverture TP2 | "
+                    f"{response2.status_code} | "
+                    f"{response2.text}"
+                )
+
+            else:
+
+                log.info(f"Runner TP2 ouvert | 30% | Size: {tp2_size}")
+
+        else:
+
+            log.warning(
+                f"Runner TP2 ignoré | Taille trop petite: {tp2_size}"
+            )
 
         state.position_side = direction
         state.position_size = total_size
@@ -628,7 +639,7 @@ def home():
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "3.1"
+        "version": "3.2"
     }), 200
 
 # ══════════════════════════════════════════════
