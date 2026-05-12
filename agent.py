@@ -334,7 +334,7 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         "epic": epic,
         "direction": "BUY" if direction == "long" else "SELL",
         "size": size,
-        "guaranteedStop": False,
+        "guaranteedStop": True,
         "stopLevel": stop_price,
         "profitLevel": tp1
     }
