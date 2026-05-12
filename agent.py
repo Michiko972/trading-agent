@@ -1,8 +1,13 @@
 """
-Agent de Trading Automatique v2
+Agent de Trading Automatique v3
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
-Version corrigée — API officielle uniquement
+
+Nouveautés :
+- Synchronisation réelle des positions
+- TP partiel 50 %
+- Runner TP2
+- Plus de faux "position_already_open"
 """
 
 import os
@@ -25,6 +30,7 @@ API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 DEFAULT_EPIC = "BTCUSD"
 
 CAPITAL_DEMO = 1000.0
+
 RISK_PCT = 0.01
 DAILY_LOSS_LIMIT = 0.02
 MAX_DRAWDOWN_PCT = 0.04
@@ -48,7 +54,6 @@ logging.basicConfig(
 
 log = logging.getLogger(__name__)
 
-# Vérification variables Railway
 log.info(f"API KEY loaded: {'YES' if API_KEY else 'NO'}")
 log.info(f"EMAIL loaded: {'YES' if API_EMAIL else 'NO'}")
 log.info(f"PASSWORD loaded: {'YES' if API_PASSWORD else 'NO'}")
@@ -70,7 +75,6 @@ class AccountState:
 
         self.trades_today = 0
 
-        self.position_open = False
         self.position_side = None
         self.position_size = 0.0
 
@@ -112,7 +116,7 @@ class AccountState:
         if self.total_pnl >= CAPITAL_DEMO * PROFIT_TARGET:
             return False, "profit_target_reached"
 
-        if self.position_open:
+        if has_open_position():
             return False, "position_already_open"
 
         return True, "ok"
@@ -129,7 +133,8 @@ class AccountState:
         self.trades_today += 1
 
         log.info(
-            f"Trade fermé | PnL: {pnl:+.2f}€ | "
+            f"Trade fermé | "
+            f"PnL: {pnl:+.2f}€ | "
             f"Jour: {self.daily_pnl:+.2f}€ | "
             f"Total: {self.total_pnl:+.2f}€"
         )
@@ -196,7 +201,7 @@ class TradingDecisionEngine:
 engine = TradingDecisionEngine()
 
 # ══════════════════════════════════════════════
-# SESSION CAPITAL.COM API
+# SESSION API
 # ══════════════════════════════════════════════
 
 def get_session():
@@ -222,11 +227,13 @@ def get_session():
         )
 
         if response.status_code != 200:
+
             log.error(
                 f"Erreur session API | "
                 f"Code: {response.status_code} | "
                 f"Réponse: {response.text}"
             )
+
             return None, None
 
         cst = response.headers.get("CST")
@@ -261,6 +268,43 @@ def get_headers():
         "X-SECURITY-TOKEN": xst,
         "Content-Type": "application/json"
     }
+
+# ══════════════════════════════════════════════
+# POSITIONS RÉELLES CAPITAL.COM
+# ══════════════════════════════════════════════
+
+def get_open_positions():
+
+    headers = get_headers()
+
+    if not headers:
+        return []
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/positions",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return []
+
+        return response.json().get("positions", [])
+
+    except Exception as e:
+
+        log.error(f"Exception récupération positions: {e}")
+
+        return []
+
+
+def has_open_position():
+
+    positions = get_open_positions()
+
+    return len(positions) > 0
 
 # ══════════════════════════════════════════════
 # POSITION SIZE
@@ -316,7 +360,9 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
     if not headers:
         return False
 
-    size = calculate_position_size(entry_price, stop_price)
+    total_size = calculate_position_size(entry_price, stop_price)
+
+    half_size = round(total_size / 2, 4)
 
     dist = abs(entry_price - stop_price)
 
@@ -330,39 +376,76 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         tp1 = entry_price - dist * TP1_RATIO
         tp2 = entry_price - dist * TP2_RATIO
 
-    payload = {
+    direction_api = "BUY" if direction == "long" else "SELL"
+
+    # ══════════════════════════════════
+    # POSITION TP1
+    # ══════════════════════════════════
+
+    payload_tp1 = {
         "epic": epic,
-        "direction": "BUY" if direction == "long" else "SELL",
-        "size": size,
+        "direction": direction_api,
+        "size": half_size,
         "guaranteedStop": True,
         "stopLevel": stop_price,
         "profitLevel": tp1
     }
 
+    # ══════════════════════════════════
+    # POSITION TP2 (RUNNER)
+    # ══════════════════════════════════
+
+    payload_tp2 = {
+        "epic": epic,
+        "direction": direction_api,
+        "size": half_size,
+        "guaranteedStop": True,
+        "stopLevel": stop_price,
+        "profitLevel": tp2
+    }
+
     try:
 
-        response = requests.post(
+        response1 = requests.post(
             f"{API_URL}/positions",
             headers=headers,
-            json=payload,
+            json=payload_tp1,
             timeout=10
         )
 
-        if response.status_code != 200:
+        if response1.status_code != 200:
 
             log.error(
-                f"Erreur ouverture position | "
-                f"{response.status_code} | "
-                f"{response.text}"
+                f"Erreur ouverture TP1 | "
+                f"{response1.status_code} | "
+                f"{response1.text}"
             )
 
             return False
 
-        deal_id = response.json().get("dealId", "N/A")
+        log.info("Position TP1 ouverte")
 
-        state.position_open = True
+        response2 = requests.post(
+            f"{API_URL}/positions",
+            headers=headers,
+            json=payload_tp2,
+            timeout=10
+        )
+
+        if response2.status_code != 200:
+
+            log.error(
+                f"Erreur ouverture TP2 | "
+                f"{response2.status_code} | "
+                f"{response2.text}"
+            )
+
+            return False
+
+        log.info("Position TP2 runner ouverte")
+
         state.position_side = direction
-        state.position_size = size
+        state.position_size = total_size
 
         state.entry_price = entry_price
         state.stop_loss = stop_price
@@ -370,7 +453,12 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         state.take_profit1 = tp1
         state.take_profit2 = tp2
 
-        log.info(f"Position ouverte avec succès | Deal: {deal_id}")
+        log.info(
+            f"Trade ouvert | "
+            f"{direction.upper()} | "
+            f"{epic} | "
+            f"Taille totale: {total_size}"
+        )
 
         return True
 
@@ -384,7 +472,7 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 # FERMETURE POSITION
 # ══════════════════════════════════════════════
 
-def close_all_positions(epic=DEFAULT_EPIC):
+def close_all_positions():
 
     headers = get_headers()
 
@@ -393,45 +481,30 @@ def close_all_positions(epic=DEFAULT_EPIC):
 
     try:
 
-        response = requests.get(
-            f"{API_URL}/positions",
-            headers=headers,
-            timeout=10
-        )
+        positions = get_open_positions()
 
-        if response.status_code != 200:
-
-            log.error(f"Erreur récupération positions: {response.text}")
-
+        if not positions:
             return False
-
-        positions = response.json().get("positions", [])
 
         for pos in positions:
 
-            if pos["market"]["epic"] == epic:
+            deal_id = pos["position"]["dealId"]
 
-                deal_id = pos["position"]["dealId"]
+            response = requests.delete(
+                f"{API_URL}/positions/{deal_id}",
+                headers=headers,
+                timeout=10
+            )
 
-                close_response = requests.delete(
-                    f"{API_URL}/positions/{deal_id}",
-                    headers=headers,
-                    timeout=10
-                )
+            if response.status_code == 200:
 
-                if close_response.status_code == 200:
+                pnl = pos["position"].get("upl", 0)
 
-                    pnl = pos["position"].get("upl", 0)
+                state.update_after_trade(pnl)
 
-                    state.update_after_trade(pnl)
+                log.info(f"Position fermée | PnL: {pnl}")
 
-                    state.position_open = False
-
-                    log.info(f"Position fermée | PnL: {pnl}")
-
-                    return True
-
-        return False
+        return True
 
     except Exception as e:
 
@@ -509,31 +582,27 @@ def webhook():
 @app.route("/status", methods=["GET"])
 def status():
 
+    open_positions = get_open_positions()
+
     return jsonify({
         "capital": round(state.capital, 2),
         "daily_pnl": round(state.daily_pnl, 2),
         "total_pnl": round(state.total_pnl, 2),
-        "position_open": state.position_open,
+        "open_positions": len(open_positions),
         "position_side": state.position_side
     }), 200
 
 # ══════════════════════════════════════════════
-# CLOSE POSITION
+# CLOSE
 # ══════════════════════════════════════════════
 
 @app.route("/close", methods=["POST"])
 def close():
 
-    if state.position_open:
-
-        success = close_all_positions()
-
-        return jsonify({
-            "status": "closed" if success else "error"
-        }), 200
+    success = close_all_positions()
 
     return jsonify({
-        "status": "no_position"
+        "status": "closed" if success else "no_position"
     }), 200
 
 # ══════════════════════════════════════════════
@@ -546,7 +615,7 @@ def home():
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "2.1"
+        "version": "3.0"
     }), 200
 
 # ══════════════════════════════════════════════
