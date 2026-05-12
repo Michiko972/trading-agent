@@ -1,26 +1,19 @@
 """
-Agent de Trading Automatique v4.0
+Agent de Trading Automatique v2
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
-
-Version :
-- API officielle uniquement
-- Une seule position
-- TP fixe classique
-- SL classique
-- Fermeture anticipée si forte mèche de retournement
+Version corrigée — API officielle uniquement
 """
 
 import os
 import json
 import logging
 import requests
-
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
 # ══════════════════════════════════════════════
-# CONFIGURATION API CAPITAL.COM
+# CONFIGURATION CAPITAL.COM API
 # ══════════════════════════════════════════════
 
 API_KEY = os.environ.get("CAPITAL_API_KEY", "").strip()
@@ -31,22 +24,14 @@ API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 
 DEFAULT_EPIC = "BTCUSD"
 
-# ══════════════════════════════════════════════
-# RISK MANAGEMENT
-# ══════════════════════════════════════════════
-
 CAPITAL_DEMO = 1000.0
-
 RISK_PCT = 0.01
-
 DAILY_LOSS_LIMIT = 0.02
 MAX_DRAWDOWN_PCT = 0.04
 PROFIT_TARGET = 0.06
 
-TP_RATIO = 2.0
-
-# Ratio mèche / taille totale bougie
-WICK_THRESHOLD = 0.6
+TP1_RATIO = 1.5
+TP2_RATIO = 3.0
 
 # ══════════════════════════════════════════════
 # LOGGING
@@ -63,11 +48,13 @@ logging.basicConfig(
 
 log = logging.getLogger(__name__)
 
-SESSION_CST = None
-SESSION_XST = None
+# Vérification variables Railway
+log.info(f"API KEY loaded: {'YES' if API_KEY else 'NO'}")
+log.info(f"EMAIL loaded: {'YES' if API_EMAIL else 'NO'}")
+log.info(f"PASSWORD loaded: {'YES' if API_PASSWORD else 'NO'}")
 
 # ══════════════════════════════════════════════
-# ACCOUNT STATE
+# ÉTAT DU COMPTE
 # ══════════════════════════════════════════════
 
 class AccountState:
@@ -83,12 +70,15 @@ class AccountState:
 
         self.trades_today = 0
 
+        self.position_open = False
         self.position_side = None
         self.position_size = 0.0
 
         self.entry_price = 0.0
         self.stop_loss = 0.0
-        self.take_profit = 0.0
+
+        self.take_profit1 = 0.0
+        self.take_profit2 = 0.0
 
         self.last_day = datetime.now(timezone.utc).date()
 
@@ -105,7 +95,7 @@ class AccountState:
             self.trades_today = 0
             self.last_day = today
 
-            log.info("Reset journalier")
+            log.info("Nouveau jour — reset journalier")
 
     def can_trade(self):
 
@@ -122,15 +112,33 @@ class AccountState:
         if self.total_pnl >= CAPITAL_DEMO * PROFIT_TARGET:
             return False, "profit_target_reached"
 
-        if has_open_position():
+        if self.position_open:
             return False, "position_already_open"
 
         return True, "ok"
 
+    def update_after_trade(self, pnl):
+
+        self.daily_pnl += pnl
+        self.total_pnl += pnl
+        self.capital += pnl
+
+        if self.capital > self.peak_equity:
+            self.peak_equity = self.capital
+
+        self.trades_today += 1
+
+        log.info(
+            f"Trade fermé | PnL: {pnl:+.2f}€ | "
+            f"Jour: {self.daily_pnl:+.2f}€ | "
+            f"Total: {self.total_pnl:+.2f}€"
+        )
+
+
 state = AccountState()
 
 # ══════════════════════════════════════════════
-# DECISION ENGINE
+# MOTEUR DE DÉCISION
 # ══════════════════════════════════════════════
 
 class TradingDecisionEngine:
@@ -146,6 +154,13 @@ class TradingDecisionEngine:
 
         di_plus = float(data.get("di_plus", 0))
         di_minus = float(data.get("di_minus", 0))
+
+        log.info(
+            f"Contexte reçu | "
+            f"signal={signal} | "
+            f"adx={adx} | "
+            f"pivot={last_pivot}"
+        )
 
         score = 0
 
@@ -170,24 +185,25 @@ class TradingDecisionEngine:
         elif signal == "short" and di_minus > di_plus:
             score += 20
 
+        log.info(f"Score confiance: {score}/100")
+
         if score < 50:
             return False, "low_confidence", score, "Score insuffisant"
 
         return True, "entry_validated", score, "Setup validé"
 
+
 engine = TradingDecisionEngine()
 
 # ══════════════════════════════════════════════
-# SESSION API
+# SESSION CAPITAL.COM API
 # ══════════════════════════════════════════════
 
 def get_session():
 
-    global SESSION_CST
-    global SESSION_XST
-
-    if SESSION_CST and SESSION_XST:
-        return SESSION_CST, SESSION_XST
+    if not API_KEY or not API_EMAIL or not API_PASSWORD:
+        log.error("Variables API manquantes")
+        return None, None
 
     try:
 
@@ -206,21 +222,23 @@ def get_session():
         )
 
         if response.status_code != 200:
-
             log.error(
                 f"Erreur session API | "
-                f"{response.status_code} | "
-                f"{response.text}"
+                f"Code: {response.status_code} | "
+                f"Réponse: {response.text}"
             )
-
             return None, None
 
-        SESSION_CST = response.headers.get("CST")
-        SESSION_XST = response.headers.get("X-SECURITY-TOKEN")
+        cst = response.headers.get("CST")
+        xst = response.headers.get("X-SECURITY-TOKEN")
 
-        log.info("Nouvelle session API ouverte")
+        if not cst or not xst:
+            log.error("Tokens session manquants")
+            return None, None
 
-        return SESSION_CST, SESSION_XST
+        log.info("Session API ouverte avec succès")
+
+        return cst, xst
 
     except Exception as e:
 
@@ -228,11 +246,13 @@ def get_session():
 
         return None, None
 
+
 def get_headers():
 
     cst, xst = get_session()
 
     if not cst or not xst:
+        log.error("Session invalide")
         return None
 
     return {
@@ -241,42 +261,6 @@ def get_headers():
         "X-SECURITY-TOKEN": xst,
         "Content-Type": "application/json"
     }
-
-# ══════════════════════════════════════════════
-# POSITIONS
-# ══════════════════════════════════════════════
-
-def get_open_positions():
-
-    headers = get_headers()
-
-    if not headers:
-        return []
-
-    try:
-
-        response = requests.get(
-            f"{API_URL}/positions",
-            headers=headers,
-            timeout=10
-        )
-
-        if response.status_code != 200:
-            return []
-
-        return response.json().get("positions", [])
-
-    except Exception as e:
-
-        log.error(f"Exception récupération positions: {e}")
-
-        return []
-
-def has_open_position():
-
-    positions = get_open_positions()
-
-    return len(positions) > 0
 
 # ══════════════════════════════════════════════
 # POSITION SIZE
@@ -322,7 +306,7 @@ def calculate_stop(signal, price, data):
         return price * (1 + atr_pct)
 
 # ══════════════════════════════════════════════
-# OPEN POSITION
+# OUVERTURE POSITION
 # ══════════════════════════════════════════════
 
 def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
@@ -337,17 +321,22 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
     dist = abs(entry_price - stop_price)
 
     if direction == "long":
-        take_profit = entry_price + dist * TP_RATIO
+
+        tp1 = entry_price + dist * TP1_RATIO
+        tp2 = entry_price + dist * TP2_RATIO
+
     else:
-        take_profit = entry_price - dist * TP_RATIO
+
+        tp1 = entry_price - dist * TP1_RATIO
+        tp2 = entry_price - dist * TP2_RATIO
 
     payload = {
         "epic": epic,
         "direction": "BUY" if direction == "long" else "SELL",
         "size": size,
         "guaranteedStop": False,
-        "stopLevel": round(stop_price, 2),
-        "profitLevel": round(take_profit, 2)
+        "stopLevel": stop_price,
+        "profitLevel": tp1
     }
 
     try:
@@ -369,18 +358,19 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
 
             return False
 
+        deal_id = response.json().get("dealId", "N/A")
+
+        state.position_open = True
         state.position_side = direction
         state.position_size = size
 
         state.entry_price = entry_price
         state.stop_loss = stop_price
-        state.take_profit = take_profit
 
-        log.info(
-            f"Trade ouvert | "
-            f"{direction.upper()} | "
-            f"{epic}"
-        )
+        state.take_profit1 = tp1
+        state.take_profit2 = tp2
+
+        log.info(f"Position ouverte avec succès | Deal: {deal_id}")
 
         return True
 
@@ -391,53 +381,10 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         return False
 
 # ══════════════════════════════════════════════
-# DÉTECTION MÈCHE RETOURNEMENT
+# FERMETURE POSITION
 # ══════════════════════════════════════════════
 
-def detect_reversal_wick(data):
-
-    signal = data.get("signal")
-
-    open_price = float(data.get("open", 0))
-    close_price = float(data.get("close", 0))
-    high_price = float(data.get("high", 0))
-    low_price = float(data.get("low", 0))
-
-    candle_size = high_price - low_price
-
-    if candle_size <= 0:
-        return False
-
-    upper_wick = high_price - max(open_price, close_price)
-    lower_wick = min(open_price, close_price) - low_price
-
-    upper_ratio = upper_wick / candle_size
-    lower_ratio = lower_wick / candle_size
-
-    bearish_confirmation = close_price < open_price
-    bullish_confirmation = close_price > open_price
-
-    # LONG -> rejet en haut
-
-    if signal == "long":
-
-        if upper_ratio >= WICK_THRESHOLD and bearish_confirmation:
-            return True
-
-    # SHORT -> rejet en bas
-
-    if signal == "short":
-
-        if lower_ratio >= WICK_THRESHOLD and bullish_confirmation:
-            return True
-
-    return False
-
-# ══════════════════════════════════════════════
-# CLOSE POSITIONS
-# ══════════════════════════════════════════════
-
-def close_all_positions():
+def close_all_positions(epic=DEFAULT_EPIC):
 
     headers = get_headers()
 
@@ -446,34 +393,54 @@ def close_all_positions():
 
     try:
 
-        positions = get_open_positions()
+        response = requests.get(
+            f"{API_URL}/positions",
+            headers=headers,
+            timeout=10
+        )
 
-        if not positions:
+        if response.status_code != 200:
+
+            log.error(f"Erreur récupération positions: {response.text}")
+
             return False
+
+        positions = response.json().get("positions", [])
 
         for pos in positions:
 
-            deal_id = pos["position"]["dealId"]
+            if pos["market"]["epic"] == epic:
 
-            response = requests.delete(
-                f"{API_URL}/positions/{deal_id}",
-                headers=headers,
-                timeout=10
-            )
+                deal_id = pos["position"]["dealId"]
 
-            if response.status_code == 200:
-                log.info("Position fermée")
+                close_response = requests.delete(
+                    f"{API_URL}/positions/{deal_id}",
+                    headers=headers,
+                    timeout=10
+                )
 
-        return True
+                if close_response.status_code == 200:
+
+                    pnl = pos["position"].get("upl", 0)
+
+                    state.update_after_trade(pnl)
+
+                    state.position_open = False
+
+                    log.info(f"Position fermée | PnL: {pnl}")
+
+                    return True
+
+        return False
 
     except Exception as e:
 
-        log.error(f"Exception fermeture positions: {e}")
+        log.error(f"Exception fermeture position: {e}")
 
         return False
 
 # ══════════════════════════════════════════════
-# FLASK APP
+# FLASK WEBHOOK
 # ══════════════════════════════════════════════
 
 app = Flask(__name__)
@@ -485,27 +452,13 @@ def webhook():
 
         data = request.get_json(force=True)
 
-        # Fermeture anticipée
-
-        if has_open_position():
-
-            if detect_reversal_wick(data):
-
-                log.info("Mèche de retournement détectée")
-
-                close_all_positions()
-
-                return jsonify({
-                    "status": "position_closed_reversal"
-                }), 200
-
-            return jsonify({
-                "status": "position_already_open"
-            }), 200
+        log.info(f"Signal reçu: {json.dumps(data)}")
 
         can_trade, reason = state.can_trade()
 
         if not can_trade:
+
+            log.warning(f"Trading bloqué: {reason}")
 
             return jsonify({
                 "status": "blocked",
@@ -513,6 +466,8 @@ def webhook():
             }), 200
 
         should_enter, reason, score, message = engine.analyze(data)
+
+        log.info(f"Décision: {message}")
 
         if should_enter:
 
@@ -524,12 +479,7 @@ def webhook():
 
             epic = data.get("epic", DEFAULT_EPIC)
 
-            success = open_position(
-                signal,
-                price,
-                stop,
-                epic
-            )
+            success = open_position(signal, price, stop, epic)
 
             return jsonify({
                 "status": "trade_opened" if success else "order_failed",
@@ -559,27 +509,31 @@ def webhook():
 @app.route("/status", methods=["GET"])
 def status():
 
-    positions = get_open_positions()
-
     return jsonify({
         "capital": round(state.capital, 2),
         "daily_pnl": round(state.daily_pnl, 2),
         "total_pnl": round(state.total_pnl, 2),
-        "open_positions": len(positions),
+        "position_open": state.position_open,
         "position_side": state.position_side
     }), 200
 
 # ══════════════════════════════════════════════
-# CLOSE
+# CLOSE POSITION
 # ══════════════════════════════════════════════
 
 @app.route("/close", methods=["POST"])
 def close():
 
-    success = close_all_positions()
+    if state.position_open:
+
+        success = close_all_positions()
+
+        return jsonify({
+            "status": "closed" if success else "error"
+        }), 200
 
     return jsonify({
-        "status": "closed" if success else "no_position"
+        "status": "no_position"
     }), 200
 
 # ══════════════════════════════════════════════
@@ -592,7 +546,7 @@ def home():
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "4.0"
+        "version": "2.1"
     }), 200
 
 # ══════════════════════════════════════════════
