@@ -1,14 +1,14 @@
 """
-Agent de Trading Automatique v3.2
+Agent de Trading Automatique v4.0
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
 
 Version :
 - API officielle uniquement
-- Synchronisation réelle des positions
-- TP1 = 70%
-- Runner TP2 = 30%
-- Ignore automatiquement TP2 si taille trop petite
+- Une seule position
+- TP fixe classique
+- SL classique
+- Fermeture anticipée si forte mèche de retournement
 """
 
 import os
@@ -43,10 +43,10 @@ DAILY_LOSS_LIMIT = 0.02
 MAX_DRAWDOWN_PCT = 0.04
 PROFIT_TARGET = 0.06
 
-TP1_RATIO = 1.5
-TP2_RATIO = 3.0
+TP_RATIO = 2.0
 
-MIN_RUNNER_SIZE = 0.01
+# Ratio mèche / taille totale bougie
+WICK_THRESHOLD = 0.6
 
 # ══════════════════════════════════════════════
 # LOGGING
@@ -63,9 +63,8 @@ logging.basicConfig(
 
 log = logging.getLogger(__name__)
 
-log.info(f"API KEY loaded: {'YES' if API_KEY else 'NO'}")
-log.info(f"EMAIL loaded: {'YES' if API_EMAIL else 'NO'}")
-log.info(f"PASSWORD loaded: {'YES' if API_PASSWORD else 'NO'}")
+SESSION_CST = None
+SESSION_XST = None
 
 # ══════════════════════════════════════════════
 # ACCOUNT STATE
@@ -89,9 +88,7 @@ class AccountState:
 
         self.entry_price = 0.0
         self.stop_loss = 0.0
-
-        self.take_profit1 = 0.0
-        self.take_profit2 = 0.0
+        self.take_profit = 0.0
 
         self.last_day = datetime.now(timezone.utc).date()
 
@@ -130,24 +127,6 @@ class AccountState:
 
         return True, "ok"
 
-    def update_after_trade(self, pnl):
-
-        self.daily_pnl += pnl
-        self.total_pnl += pnl
-        self.capital += pnl
-
-        if self.capital > self.peak_equity:
-            self.peak_equity = self.capital
-
-        self.trades_today += 1
-
-        log.info(
-            f"Trade fermé | "
-            f"PnL: {pnl:+.2f}€ | "
-            f"Jour: {self.daily_pnl:+.2f}€ | "
-            f"Total: {self.total_pnl:+.2f}€"
-        )
-
 state = AccountState()
 
 # ══════════════════════════════════════════════
@@ -167,13 +146,6 @@ class TradingDecisionEngine:
 
         di_plus = float(data.get("di_plus", 0))
         di_minus = float(data.get("di_minus", 0))
-
-        log.info(
-            f"Contexte reçu | "
-            f"signal={signal} | "
-            f"adx={adx} | "
-            f"pivot={last_pivot}"
-        )
 
         score = 0
 
@@ -198,8 +170,6 @@ class TradingDecisionEngine:
         elif signal == "short" and di_minus > di_plus:
             score += 20
 
-        log.info(f"Score confiance: {score}/100")
-
         if score < 50:
             return False, "low_confidence", score, "Score insuffisant"
 
@@ -213,11 +183,11 @@ engine = TradingDecisionEngine()
 
 def get_session():
 
-    if not API_KEY or not API_EMAIL or not API_PASSWORD:
+    global SESSION_CST
+    global SESSION_XST
 
-        log.error("Variables API manquantes")
-
-        return None, None
+    if SESSION_CST and SESSION_XST:
+        return SESSION_CST, SESSION_XST
 
     try:
 
@@ -245,18 +215,12 @@ def get_session():
 
             return None, None
 
-        cst = response.headers.get("CST")
-        xst = response.headers.get("X-SECURITY-TOKEN")
+        SESSION_CST = response.headers.get("CST")
+        SESSION_XST = response.headers.get("X-SECURITY-TOKEN")
 
-        if not cst or not xst:
+        log.info("Nouvelle session API ouverte")
 
-            log.error("Tokens session manquants")
-
-            return None, None
-
-        log.info("Session API ouverte avec succès")
-
-        return cst, xst
+        return SESSION_CST, SESSION_XST
 
     except Exception as e:
 
@@ -269,9 +233,6 @@ def get_headers():
     cst, xst = get_session()
 
     if not cst or not xst:
-
-        log.error("Session invalide")
-
         return None
 
     return {
@@ -301,9 +262,6 @@ def get_open_positions():
         )
 
         if response.status_code != 200:
-
-            log.error(f"Erreur récupération positions: {response.text}")
-
             return []
 
         return response.json().get("positions", [])
@@ -374,109 +332,54 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
     if not headers:
         return False
 
-    total_size = calculate_position_size(entry_price, stop_price)
-
-    tp1_size = round(total_size * 0.7, 4)
-    tp2_size = round(total_size * 0.3, 4)
+    size = calculate_position_size(entry_price, stop_price)
 
     dist = abs(entry_price - stop_price)
 
     if direction == "long":
-
-        tp1 = entry_price + dist * TP1_RATIO
-        tp2 = entry_price + dist * TP2_RATIO
-
+        take_profit = entry_price + dist * TP_RATIO
     else:
+        take_profit = entry_price - dist * TP_RATIO
 
-        tp1 = entry_price - dist * TP1_RATIO
-        tp2 = entry_price - dist * TP2_RATIO
-
-    direction_api = "BUY" if direction == "long" else "SELL"
+    payload = {
+        "epic": epic,
+        "direction": "BUY" if direction == "long" else "SELL",
+        "size": size,
+        "guaranteedStop": False,
+        "stopLevel": round(stop_price, 2),
+        "profitLevel": round(take_profit, 2)
+    }
 
     try:
 
-        # TP1 — 70%
-
-        payload_tp1 = {
-            "epic": epic,
-            "direction": direction_api,
-            "size": tp1_size,
-            "guaranteedStop": False,
-            "stopLevel": round(stop_price, 2),
-            "profitLevel": round(tp1, 2)
-        }
-
-        response1 = requests.post(
+        response = requests.post(
             f"{API_URL}/positions",
             headers=headers,
-            json=payload_tp1,
+            json=payload,
             timeout=10
         )
 
-        if response1.status_code != 200:
+        if response.status_code != 200:
 
             log.error(
-                f"Erreur ouverture TP1 | "
-                f"{response1.status_code} | "
-                f"{response1.text}"
+                f"Erreur ouverture position | "
+                f"{response.status_code} | "
+                f"{response.text}"
             )
 
             return False
 
-        log.info(f"TP1 ouvert | 70% | Size: {tp1_size}")
-
-        # TP2 — 30%
-
-        if tp2_size >= MIN_RUNNER_SIZE:
-
-            payload_tp2 = {
-                "epic": epic,
-                "direction": direction_api,
-                "size": tp2_size,
-                "guaranteedStop": False,
-                "stopLevel": round(stop_price, 2),
-                "profitLevel": round(tp2, 2)
-            }
-
-            response2 = requests.post(
-                f"{API_URL}/positions",
-                headers=headers,
-                json=payload_tp2,
-                timeout=10
-            )
-
-            if response2.status_code != 200:
-
-                log.error(
-                    f"Erreur ouverture TP2 | "
-                    f"{response2.status_code} | "
-                    f"{response2.text}"
-                )
-
-            else:
-
-                log.info(f"Runner TP2 ouvert | 30% | Size: {tp2_size}")
-
-        else:
-
-            log.warning(
-                f"Runner TP2 ignoré | Taille trop petite: {tp2_size}"
-            )
-
         state.position_side = direction
-        state.position_size = total_size
+        state.position_size = size
 
         state.entry_price = entry_price
         state.stop_loss = stop_price
-
-        state.take_profit1 = tp1
-        state.take_profit2 = tp2
+        state.take_profit = take_profit
 
         log.info(
             f"Trade ouvert | "
             f"{direction.upper()} | "
-            f"{epic} | "
-            f"Size totale: {total_size}"
+            f"{epic}"
         )
 
         return True
@@ -486,6 +389,49 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         log.error(f"Exception ouverture position: {e}")
 
         return False
+
+# ══════════════════════════════════════════════
+# DÉTECTION MÈCHE RETOURNEMENT
+# ══════════════════════════════════════════════
+
+def detect_reversal_wick(data):
+
+    signal = data.get("signal")
+
+    open_price = float(data.get("open", 0))
+    close_price = float(data.get("close", 0))
+    high_price = float(data.get("high", 0))
+    low_price = float(data.get("low", 0))
+
+    candle_size = high_price - low_price
+
+    if candle_size <= 0:
+        return False
+
+    upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
+
+    upper_ratio = upper_wick / candle_size
+    lower_ratio = lower_wick / candle_size
+
+    bearish_confirmation = close_price < open_price
+    bullish_confirmation = close_price > open_price
+
+    # LONG -> rejet en haut
+
+    if signal == "long":
+
+        if upper_ratio >= WICK_THRESHOLD and bearish_confirmation:
+            return True
+
+    # SHORT -> rejet en bas
+
+    if signal == "short":
+
+        if lower_ratio >= WICK_THRESHOLD and bullish_confirmation:
+            return True
+
+    return False
 
 # ══════════════════════════════════════════════
 # CLOSE POSITIONS
@@ -516,12 +462,7 @@ def close_all_positions():
             )
 
             if response.status_code == 200:
-
-                pnl = pos["position"].get("upl", 0)
-
-                state.update_after_trade(pnl)
-
-                log.info(f"Position fermée | PnL: {pnl}")
+                log.info("Position fermée")
 
         return True
 
@@ -544,13 +485,27 @@ def webhook():
 
         data = request.get_json(force=True)
 
-        log.info(f"Signal reçu: {json.dumps(data)}")
+        # Fermeture anticipée
+
+        if has_open_position():
+
+            if detect_reversal_wick(data):
+
+                log.info("Mèche de retournement détectée")
+
+                close_all_positions()
+
+                return jsonify({
+                    "status": "position_closed_reversal"
+                }), 200
+
+            return jsonify({
+                "status": "position_already_open"
+            }), 200
 
         can_trade, reason = state.can_trade()
 
         if not can_trade:
-
-            log.warning(f"Trading bloqué: {reason}")
 
             return jsonify({
                 "status": "blocked",
@@ -558,8 +513,6 @@ def webhook():
             }), 200
 
         should_enter, reason, score, message = engine.analyze(data)
-
-        log.info(f"Décision: {message}")
 
         if should_enter:
 
@@ -639,7 +592,7 @@ def home():
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "3.2"
+        "version": "4.0"
     }), 200
 
 # ══════════════════════════════════════════════
