@@ -268,7 +268,7 @@ def calculate_position_size(entry_price, stop_price):
 
     size = RISK_PER_TRADE_EUR / distance
 
-    size = round(size, 2)
+    size = round(size, 1)
 
     return max(0.1, size)
 
@@ -368,7 +368,7 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         "epic": epic,
         "direction": "BUY" if direction == "long" else "SELL",
         "size": size,
-        "guaranteedStop": False,
+        "guaranteedStop": True,
         "stopLevel": round(stop_price, 2),
         "profitLevel": round(take_profit, 2)
     }
