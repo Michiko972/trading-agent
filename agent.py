@@ -1,13 +1,12 @@
 """
-Agent de Trading Automatique v2.3
+Agent de Trading Automatique v2.4
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
 
 Version :
 - Une seule position
-- TP fixe basé sur objectif €
-- SL fixe basé sur risque €
-- Gestion type prop firm
+- TP basé sur ratio prop firm
+- Ancien calcul de stop basé pivots
 - Fermeture anticipée sur mèche retournement
 """
 
@@ -52,9 +51,6 @@ TP_RATIO = DAILY_TARGET_EUR / RISK_PER_TRADE_EUR
 
 # Détection retournement
 WICK_THRESHOLD = 0.6
-
-# Distance stop minimale
-MIN_STOP_DISTANCE_PCT = 0.003
 
 # ══════════════════════════════════════════════
 # LOGGING
@@ -264,26 +260,39 @@ def calculate_position_size(entry_price, stop_price):
     distance = abs(entry_price - stop_price)
 
     if distance <= 0:
-        return 0.1
+        return 1
 
     size = RISK_PER_TRADE_EUR / distance
 
-    size = round(size, 1)
+    size = round(size)
 
-    return max(0.1, size)
+    return max(1, size)
 
 # ══════════════════════════════════════════════
-# STOP LOSS
+# STOP LOSS (ANCIEN SYSTÈME STABLE)
 # ══════════════════════════════════════════════
 
-def calculate_stop(signal, price):
+def calculate_stop(signal, price, data):
 
-    stop_distance = price * MIN_STOP_DISTANCE_PCT
+    atr_pct = 0.015
 
     if signal == "long":
-        return price - stop_distance
 
-    return price + stop_distance
+        pivot_low = float(data.get("pivot_low", 0))
+
+        if pivot_low > 0:
+            return pivot_low * 0.998
+
+        return price * (1 - atr_pct)
+
+    else:
+
+        pivot_high = float(data.get("pivot_high", 0))
+
+        if pivot_high > 0:
+            return pivot_high * 1.002
+
+        return price * (1 + atr_pct)
 
 # ══════════════════════════════════════════════
 # TAKE PROFIT
@@ -516,7 +525,7 @@ def webhook():
 
             price = float(data.get("price", 0))
 
-            stop = calculate_stop(signal, price)
+            stop = calculate_stop(signal, price, data)
 
             epic = data.get("epic", DEFAULT_EPIC)
 
@@ -553,7 +562,7 @@ def home():
 
     return jsonify({
         "status": "Agent Trading actif",
-        "version": "2.3"
+        "version": "2.4"
     }), 200
 
 if __name__ == "__main__":
