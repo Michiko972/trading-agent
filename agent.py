@@ -1,12 +1,17 @@
+# agent.py — Version complète v2.6
+
+```python
 """
-Agent de Trading Automatique v2.2
+Agent de Trading Automatique v2.6
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
-Version corrigée — API officielle uniquement
 
 Corrections :
-- guaranteedStop remis à True
-- synchronisation automatique des positions
+- Synchronisation automatique des positions
+- Filtrage des faux setups
+- Cooldown après fermeture
+- Stop garanti automatique selon le marché
+- Réduction des flips long/short
 """
 
 import os
@@ -83,6 +88,8 @@ class AccountState:
         self.take_profit1 = 0.0
         self.take_profit2 = 0.0
 
+        self.last_trade_time = None
+
         self.last_day = datetime.now(timezone.utc).date()
 
     def reset_daily(self):
@@ -115,6 +122,17 @@ class AccountState:
         if self.total_pnl >= CAPITAL_DEMO * PROFIT_TARGET:
             return False, "profit_target_reached"
 
+        # Cooldown après fermeture
+        if self.last_trade_time:
+
+            elapsed = (
+                datetime.now(timezone.utc)
+                - self.last_trade_time
+            ).total_seconds()
+
+            if elapsed < 600:
+                return False, "cooldown_after_trade"
+
         if self.position_open:
             return False, "position_already_open"
 
@@ -130,6 +148,8 @@ class AccountState:
             self.peak_equity = self.capital
 
         self.trades_today += 1
+
+        self.last_trade_time = datetime.now(timezone.utc)
 
         log.info(
             f"Trade fermé | PnL: {pnl:+.2f}€ | "
@@ -157,6 +177,8 @@ class TradingDecisionEngine:
         di_plus = float(data.get("di_plus", 0))
         di_minus = float(data.get("di_minus", 0))
 
+        impulse = data.get("impulse", "")
+
         log.info(
             f"Contexte reçu | "
             f"signal={signal} | "
@@ -164,32 +186,51 @@ class TradingDecisionEngine:
             f"pivot={last_pivot}"
         )
 
+        if adx < 25:
+            return False, "weak_trend", 0, "ADX trop faible"
+
+        if impulse == "weak":
+            return False, "weak_impulse", 0, "Impulsion faible"
+
         score = 0
 
-        if adx > 20:
-            score += 30
+        # LONG
+        if signal == "long":
 
-        if adx_rising:
-            score += 20
+            if di_plus <= di_minus:
+                return False, "di_conflict", 0, "DI contradictoire"
 
-        if signal == "long" and last_pivot == "low":
-            score += 30
+            if last_pivot != "low":
+                return False, "pivot_invalid", 0, "Pivot invalide"
 
-        elif signal == "short" and last_pivot == "high":
-            score += 30
+            score += 50
 
-        else:
-            score += 10
+            if adx_rising:
+                score += 25
 
-        if signal == "long" and di_plus > di_minus:
-            score += 20
+            if impulse == "bullish":
+                score += 25
 
-        elif signal == "short" and di_minus > di_plus:
-            score += 20
+        # SHORT
+        elif signal == "short":
+
+            if di_minus <= di_plus:
+                return False, "di_conflict", 0, "DI contradictoire"
+
+            if last_pivot != "high":
+                return False, "pivot_invalid", 0, "Pivot invalide"
+
+            score += 50
+
+            if adx_rising:
+                score += 25
+
+            if impulse == "bearish":
+                score += 25
 
         log.info(f"Score confiance: {score}/100")
 
-        if score < 50:
+        if score < 75:
             return False, "low_confidence", score, "Score insuffisant"
 
         return True, "entry_validated", score, "Setup validé"
@@ -286,16 +327,17 @@ def sync_position_state(epic=DEFAULT_EPIC):
 
         positions = response.json().get("positions", [])
 
-        epic_open = any(
-            p["market"]["epic"] == epic
-            for p in positions
-        )
+        has_position = False
 
-        if state.position_open and not epic_open:
+        for pos in positions:
 
-            log.info("Position fermée détectée automatiquement")
+            if pos["market"]["epic"] == epic:
+                has_position = True
+                break
 
-            state.position_open = False
+        state.position_open = has_position
+
+        if not has_position:
             state.position_side = None
 
     except Exception as e:
@@ -370,13 +412,18 @@ def open_position(direction, entry_price, stop_price, epic=DEFAULT_EPIC):
         tp1 = entry_price - dist * TP1_RATIO
         tp2 = entry_price - dist * TP2_RATIO
 
+    guaranteed_stop = False
+
+    if "BTC" in epic or "ETH" in epic:
+        guaranteed_stop = True
+
     payload = {
         "epic": epic,
         "direction": "BUY" if direction == "long" else "SELL",
         "size": size,
-        "guaranteedStop": True,
-        "stopLevel": stop_price,
-        "profitLevel": tp1
+        "guaranteedStop": guaranteed_stop,
+        "stopLevel": round(stop_price, 2),
+        "profitLevel": round(tp1, 2)
     }
 
     try:
@@ -546,56 +593,14 @@ def webhook():
             "message": str(e)
         }), 500
 
-# ══════════════════════════════════════════════
-# STATUS
-# ══════════════════════════════════════════════
-
-@app.route("/status", methods=["GET"])
-def status():
-
-    return jsonify({
-        "capital": round(state.capital, 2),
-        "daily_pnl": round(state.daily_pnl, 2),
-        "total_pnl": round(state.total_pnl, 2),
-        "position_open": state.position_open,
-        "position_side": state.position_side
-    }), 200
-
-# ══════════════════════════════════════════════
-# CLOSE POSITION
-# ══════════════════════════════════════════════
-
-@app.route("/close", methods=["POST"])
-def close():
-
-    if state.position_open:
-
-        success = close_all_positions()
-
-        return jsonify({
-            "status": "closed" if success else "error"
-        }), 200
-
-    return jsonify({
-        "status": "no_position"
-    }), 200
-
-# ══════════════════════════════════════════════
-# HOME
-# ══════════════════════════════════════════════
-
 @app.route("/", methods=["GET"])
 def home():
 
     return jsonify({
         "status": "Agent Trading actif",
         "mode": "DEMO",
-        "version": "2.2"
+        "version": "2.6"
     }), 200
-
-# ══════════════════════════════════════════════
-# START
-# ══════════════════════════════════════════════
 
 if __name__ == "__main__":
 
@@ -606,3 +611,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
 
     app.run(host="0.0.0.0", port=port)
+```
