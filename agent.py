@@ -1,6 +1,4 @@
 # agent.py — Version complète v2.6
-
-```python
 """
 Agent de Trading Automatique v2.6
 Architecture : Pine Script = capteur, Agent IA = décideur
