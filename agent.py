@@ -155,8 +155,10 @@ class TradingDecisionEngine:
 
         if signal == "long":
 
-            if di_plus <= di_minus:
-                return False, "di_conflict", 0, "DI contradictoire"
+           if di_plus > di_minus:
+           score += 15
+           else:
+           score -= 5
 
             if last_pivot != "low":
                 return False, "pivot_invalid", 0, "Pivot invalide"
@@ -171,8 +173,10 @@ class TradingDecisionEngine:
 
         elif signal == "short":
 
-            if di_minus <= di_plus:
-                return False, "di_conflict", 0, "DI contradictoire"
+            if di_minus > di_plus:
+            score += 15
+            else:
+            score -= 5
 
             if last_pivot != "high":
                 return False, "pivot_invalid", 0, "Pivot invalide"
