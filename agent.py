@@ -467,6 +467,7 @@ def webhook():
             }), 400
 
         data = json.loads(raw_data)
+        log.info(f"Signal reçu: {json.dumps(data)}")
 
         sync_position_state(
             data.get("epic", DEFAULT_EPIC)
