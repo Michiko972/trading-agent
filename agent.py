@@ -447,7 +447,9 @@ def open_position(direction, entry_price, stop_price, epic):
 
 
 app = Flask(__name__)
-
+@app.route("/test", methods=["GET"])
+def test():
+    return "TEST OK", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
