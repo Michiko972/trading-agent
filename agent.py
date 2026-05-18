@@ -153,41 +153,42 @@ class TradingDecisionEngine:
 
         score = 0
 
-        if signal == "long":
+       
+if signal == "long":
 
-           if di_plus > di_minus:
-           score += 15
-           else:
-           score -= 5
+    if di_plus > di_minus:
+        score += 15
+    else:
+        score -= 5
 
-            if last_pivot != "low":
-                return False, "pivot_invalid", 0, "Pivot invalide"
+    if last_pivot != "low":
+        return False, "pivot_invalid", 0, "Pivot invalide"
 
-            score += 50
+    score += 50
 
-            if adx_rising:
-                score += 25
+    if adx_rising:
+        score += 25
 
-            if impulse == "bullish":
-                score += 25
+    if impulse == "bullish":
+        score += 25
 
-        elif signal == "short":
+elif signal == "short":
 
-            if di_minus > di_plus:
-            score += 15
-            else:
-            score -= 5
+    if di_minus > di_plus:
+        score += 15
+    else:
+        score -= 5
 
-            if last_pivot != "high":
-                return False, "pivot_invalid", 0, "Pivot invalide"
+    if last_pivot != "high":
+        return False, "pivot_invalid", 0, "Pivot invalide"
 
-            score += 50
+    score += 50
 
-            if adx_rising:
-                score += 25
+    if adx_rising:
+        score += 25
 
-            if impulse == "bearish":
-                score += 25
+    if impulse == "bearish":
+        score += 25
 
         if score < 75:
             return False, "low_confidence", score, "Score insuffisant"
