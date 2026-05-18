@@ -456,11 +456,17 @@ def webhook():
 
     try:
 
-raw_data = request.data.decode("utf-8")
+        raw_data = request.data.decode("utf-8")
 
-log.info(f"RAW WEBHOOK: {raw_data}")
+        log.info(f"RAW WEBHOOK: {raw_data}")
 
-data = json.loads(raw_data)
+        if not raw_data:
+
+            return jsonify({
+                "status": "empty_webhook"
+            }), 400
+
+        data = json.loads(raw_data)
 
         sync_position_state(
             data.get("epic", DEFAULT_EPIC)
