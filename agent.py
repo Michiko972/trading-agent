@@ -1,7 +1,16 @@
 """
-Agent de Trading Automatique v2.7
+Agent de Trading Automatique v2.8
 Architecture : Pine Script = capteur, Agent IA = décideur
 Broker : Capital.com (démo)
+
+Version stable :
+- Webhook TradingView corrigé
+- Analyse stable
+- DMI assoupli
+- Logs détaillés
+- Réouverture des positions
+- Stop garanti adaptatif
+- TP/SL adaptatifs
 """
 
 import os
@@ -32,6 +41,8 @@ PROFIT_TARGET = 0.06
 
 TP1_RATIO = 1.5
 
+# LOGGING
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -42,6 +53,8 @@ logging.basicConfig(
 )
 
 log = logging.getLogger(__name__)
+
+# ÉTAT COMPTE
 
 class AccountState:
 
@@ -106,18 +119,9 @@ class AccountState:
 
         return True, "ok"
 
-    def update_after_trade(self, pnl):
-
-        self.daily_pnl += pnl
-        self.total_pnl += pnl
-        self.capital += pnl
-
-        if self.capital > self.peak_equity:
-            self.peak_equity = self.capital
-
-        self.last_trade_time = datetime.now(timezone.utc)
-
 state = AccountState()
+
+# MOTEUR DÉCISION
 
 class TradingDecisionEngine:
 
@@ -187,6 +191,127 @@ class TradingDecisionEngine:
 
 engine = TradingDecisionEngine()
 
+# API CAPITAL
+
+def get_session():
+
+    try:
+
+        response = requests.post(
+            f"{API_URL}/session",
+            headers={
+                "X-CAP-API-KEY": API_KEY,
+                "Content-Type": "application/json"
+            },
+            json={
+                "identifier": API_EMAIL,
+                "password": API_PASSWORD,
+                "encryptedPassword": False
+            },
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return None, None
+
+        cst = response.headers.get("CST")
+        xst = response.headers.get("X-SECURITY-TOKEN")
+
+        return cst, xst
+
+    except Exception:
+        return None, None
+
+
+def get_headers():
+
+    cst, xst = get_session()
+
+    if not cst or not xst:
+        return None
+
+    return {
+        "X-CAP-API-KEY": API_KEY,
+        "CST": cst,
+        "X-SECURITY-TOKEN": xst,
+        "Content-Type": "application/json"
+    }
+
+
+def open_position(direction, price, epic):
+
+    headers = get_headers()
+
+    if not headers:
+        log.error("Session API invalide")
+        return False
+
+    guaranteed_stop = False
+
+    if "BTC" in epic or "ETH" in epic:
+        guaranteed_stop = True
+
+    distance = price * 0.01
+
+    if direction == "long":
+
+        stop_level = price - distance
+        take_profit = price + (distance * TP1_RATIO)
+
+        side = "BUY"
+
+    else:
+
+        stop_level = price + distance
+        take_profit = price - (distance * TP1_RATIO)
+
+        side = "SELL"
+
+    payload = {
+        "epic": epic,
+        "direction": side,
+        "size": 1,
+        "guaranteedStop": guaranteed_stop,
+        "stopLevel": round(stop_level, 2),
+        "profitLevel": round(take_profit, 2)
+    }
+
+    log.info(f"Payload ordre: {payload}")
+
+    try:
+
+        response = requests.post(
+            f"{API_URL}/positions",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+
+            log.error(
+                f"Erreur ouverture position | "
+                f"{response.status_code} | "
+                f"{response.text}"
+            )
+
+            return False
+
+        log.info("Position ouverte")
+
+        state.position_open = True
+        state.position_side = direction
+
+        return True
+
+    except Exception as e:
+
+        log.error(f"Erreur open_position: {e}")
+
+        return False
+
+# FLASK
+
 app = Flask(__name__)
 
 @app.route("/test", methods=["GET"])
@@ -227,10 +352,32 @@ def webhook():
 
         log.info(f"Décision: {message}")
 
+        if should_enter:
+
+            signal = data.get("signal")
+            price = float(data.get("price", 0))
+            epic = data.get("epic", DEFAULT_EPIC)
+
+            success = open_position(
+                signal,
+                price,
+                epic
+            )
+
+            return jsonify({
+                "status": (
+                    "trade_opened"
+                    if success
+                    else "order_failed"
+                ),
+                "score": score,
+                "message": message
+            }), 200
+
         return jsonify({
-            "status": "ok",
-            "score": score,
-            "message": message
+            "status": "no_trade",
+            "reason": reason,
+            "score": score
         }), 200
 
     except Exception as e:
@@ -247,7 +394,7 @@ def home():
 
     return jsonify({
         "status": "Agent Trading actif",
-        "version": "2.7"
+        "version": "2.8"
     }), 200
 
 if __name__ == "__main__":
@@ -255,3 +402,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
 
     app.run(host="0.0.0.0", port=port)
+
