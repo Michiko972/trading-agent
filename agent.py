@@ -485,6 +485,7 @@ def webhook():
         should_enter, reason, score, message = (
             engine.analyze(data)
         )
+        log.info(f"Décision: {message}")
 
         if should_enter:
 
