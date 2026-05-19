@@ -1,16 +1,6 @@
 """
-Agent de Trading Automatique v2.8
-Architecture : Pine Script = capteur, Agent IA = décideur
-Broker : Capital.com (démo)
-
-Version stable :
-- Webhook TradingView corrigé
-- Analyse stable
-- DMI assoupli
-- Logs détaillés
-- Réouverture des positions
-- Stop garanti adaptatif
-- TP/SL adaptatifs
+Agent Trading IA v3.0 — Adaptatif
+TradingView -> Railway -> Capital.com
 """
 
 import os
@@ -21,7 +11,9 @@ import requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
-# CONFIGURATION
+# ==========================================
+# CONFIG
+# ==========================================
 
 API_KEY = os.environ.get("CAPITAL_API_KEY", "").strip()
 API_EMAIL = os.environ.get("CAPITAL_EMAIL", "").strip()
@@ -32,77 +24,39 @@ API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 DEFAULT_EPIC = "BTCUSD"
 
 CAPITAL_DEMO = 1000.0
-
 RISK_PCT = 0.01
+TP_RATIO = 1.5
 
-DAILY_LOSS_LIMIT = 0.02
-MAX_DRAWDOWN_PCT = 0.04
-PROFIT_TARGET = 0.06
-
-TP1_RATIO = 1.5
-
-# LOGGING
+# ==========================================
+# LOGS
+# ==========================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("agent.log")
-    ]
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 log = logging.getLogger(__name__)
 
-# ÉTAT COMPTE
+# ==========================================
+# STATE
+# ==========================================
 
 class AccountState:
 
     def __init__(self):
 
         self.capital = CAPITAL_DEMO
-        self.peak_equity = CAPITAL_DEMO
-
-        self.daily_pnl = 0.0
-        self.total_pnl = 0.0
 
         self.position_open = False
         self.position_side = None
-        self.position_size = 0.0
-
-        self.entry_price = 0.0
-        self.stop_loss = 0.0
-        self.take_profit = 0.0
 
         self.last_trade_time = None
 
-        self.last_day = datetime.now(timezone.utc).date()
-
-    def reset_daily(self):
-
-        today = datetime.now(timezone.utc).date()
-
-        if today != self.last_day:
-
-            self.daily_pnl = 0.0
-            self.last_day = today
-
-            log.info("Reset journalier")
-
     def can_trade(self):
 
-        self.reset_daily()
-
-        if self.daily_pnl <= -(CAPITAL_DEMO * DAILY_LOSS_LIMIT):
-            return False, "daily_loss_limit"
-
-        drawdown = self.peak_equity - self.capital
-
-        if drawdown >= CAPITAL_DEMO * MAX_DRAWDOWN_PCT:
-            return False, "max_drawdown"
-
-        if self.total_pnl >= CAPITAL_DEMO * PROFIT_TARGET:
-            return False, "profit_target_reached"
+        if self.position_open:
+            return False, "position_already_open"
 
         if self.last_trade_time:
 
@@ -111,17 +65,16 @@ class AccountState:
                 - self.last_trade_time
             ).total_seconds()
 
-            if elapsed < 600:
-                return False, "cooldown_after_trade"
-
-        if self.position_open:
-            return False, "position_already_open"
+            if elapsed < 120:
+                return False, "cooldown"
 
         return True, "ok"
 
 state = AccountState()
 
-# MOTEUR DÉCISION
+# ==========================================
+# ENGINE
+# ==========================================
 
 class TradingDecisionEngine:
 
@@ -133,65 +86,77 @@ class TradingDecisionEngine:
 
         adx_rising = data.get("adx_rising", False)
 
-        last_pivot = data.get("last_pivot", "")
-
         di_plus = float(data.get("di_plus", 0))
         di_minus = float(data.get("di_minus", 0))
 
+        last_pivot = data.get("last_pivot", "")
+
         impulse = data.get("impulse", "")
 
-        if adx < 25:
-            return False, "weak_trend", 0, "ADX trop faible"
-
-        if impulse == "weak":
-            return False, "weak_impulse", 0, "Impulsion faible"
-
         score = 0
+
+        # ADX
+
+        if adx >= 25:
+            score += 25
+        else:
+            score -= 10
+
+        # ADX rising
+
+        if adx_rising:
+            score += 15
+
+        # LONG
 
         if signal == "long":
 
             if di_plus > di_minus:
-                score += 15
+                score += 10
             else:
                 score -= 5
 
-            if last_pivot != "low":
-                return False, "pivot_invalid", 0, "Pivot invalide"
-
-            score += 50
-
-            if adx_rising:
-                score += 25
+            if last_pivot == "low":
+                score += 20
+            else:
+                score -= 10
 
             if impulse == "bullish":
-                score += 25
+                score += 20
+            else:
+                score -= 5
+
+        # SHORT
 
         elif signal == "short":
 
             if di_minus > di_plus:
-                score += 15
+                score += 10
             else:
                 score -= 5
 
-            if last_pivot != "high":
-                return False, "pivot_invalid", 0, "Pivot invalide"
-
-            score += 50
-
-            if adx_rising:
-                score += 25
+            if last_pivot == "high":
+                score += 20
+            else:
+                score -= 10
 
             if impulse == "bearish":
-                score += 25
+                score += 20
+            else:
+                score -= 5
 
-        if score < 75:
-            return False, "low_confidence", score, "Score insuffisant"
+        log.info(f"Score final: {score}")
 
-        return True, "entry_validated", score, "Setup validé"
+        if score >= 55:
+            return True, score, "Setup validé"
+
+        return False, score, "Setup refusé"
 
 engine = TradingDecisionEngine()
 
-# API CAPITAL
+# ==========================================
+# CAPITAL API
+# ==========================================
 
 def get_session():
 
@@ -214,12 +179,15 @@ def get_session():
         if response.status_code != 200:
             return None, None
 
-        cst = response.headers.get("CST")
-        xst = response.headers.get("X-SECURITY-TOKEN")
+        return (
+            response.headers.get("CST"),
+            response.headers.get("X-SECURITY-TOKEN")
+        )
 
-        return cst, xst
+    except Exception as e:
 
-    except Exception:
+        log.error(f"Erreur session: {e}")
+
         return None, None
 
 
@@ -237,43 +205,149 @@ def get_headers():
         "Content-Type": "application/json"
     }
 
+# ==========================================
+# MARKET RULES
+# ==========================================
+
+def get_market_rules(epic):
+
+    headers = get_headers()
+
+    if not headers:
+        return None
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/markets/{epic}",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return None
+
+        market = response.json()
+
+        return {
+            "min_size": float(
+                market["dealingRules"]
+                .get("minDealSize", {})
+                .get("value", 0.01)
+            ),
+
+            "min_stop": float(
+                market["dealingRules"]
+                .get("minNormalStopOrLimitDistance", {})
+                .get("value", 1)
+            ),
+
+            "decimals": int(
+                market["snapshot"]
+                .get("decimalPlacesFactor", 2)
+            )
+        }
+
+    except Exception as e:
+
+        log.error(f"Erreur market rules: {e}")
+
+        return None
+
+# ==========================================
+# POSITION SIZE
+# ==========================================
+
+def calculate_position_size(epic, price, stop_distance, min_size):
+
+    risk_amount = state.capital * RISK_PCT
+
+    if stop_distance <= 0:
+        return min_size
+
+    size = risk_amount / stop_distance
+
+    # Crypto
+    if "BTC" in epic:
+        size *= 0.01
+
+    elif "ETH" in epic:
+        size *= 0.05
+
+    # NASDAQ
+    elif "NAS" in epic:
+        size *= 0.5
+
+    size = round(size, 4)
+
+    return max(size, min_size)
+
+# ==========================================
+# OPEN POSITION
+# ==========================================
 
 def open_position(direction, price, epic):
 
     headers = get_headers()
 
     if not headers:
-        log.error("Session API invalide")
         return False
+
+    rules = get_market_rules(epic)
+
+    if not rules:
+        return False
+
+    min_size = rules["min_size"]
+    min_stop = rules["min_stop"]
+    decimals = rules["decimals"]
+
+    # ATR simplifié adaptatif
+
+    stop_distance = price * 0.005
+
+    if stop_distance < min_stop:
+        stop_distance = min_stop
+
+    # Long
+
+    if direction == "long":
+
+        side = "BUY"
+
+        stop_level = price - stop_distance
+        take_profit = price + (stop_distance * TP_RATIO)
+
+    # Short
+
+    else:
+
+        side = "SELL"
+
+        stop_level = price + stop_distance
+        take_profit = price - (stop_distance * TP_RATIO)
+
+    # Stop garanti auto
 
     guaranteed_stop = False
 
     if "BTC" in epic or "ETH" in epic:
         guaranteed_stop = True
 
-    distance = price * 0.01
-
-    if direction == "long":
-
-        stop_level = price - distance
-        take_profit = price + (distance * TP1_RATIO)
-
-        side = "BUY"
-
-    else:
-
-        stop_level = price + distance
-        take_profit = price - (distance * TP1_RATIO)
-
-        side = "SELL"
+    size = calculate_position_size(
+        epic,
+        price,
+        stop_distance,
+        min_size
+    )
 
     payload = {
         "epic": epic,
         "direction": side,
-        "size": 1,
+        "size": size,
         "guaranteedStop": guaranteed_stop,
-        "stopLevel": round(stop_level, 2),
-        "profitLevel": round(take_profit, 2)
+        "stopLevel": round(stop_level, decimals),
+        "profitLevel": round(take_profit, decimals)
     }
 
     log.info(f"Payload ordre: {payload}")
@@ -287,20 +361,22 @@ def open_position(direction, price, epic):
             timeout=10
         )
 
+        log.info(f"Réponse broker: {response.text}")
+
         if response.status_code != 200:
 
             log.error(
                 f"Erreur ouverture position | "
-                f"{response.status_code} | "
-                f"{response.text}"
+                f"{response.status_code}"
             )
 
             return False
 
-        log.info("Position ouverte")
-
         state.position_open = True
         state.position_side = direction
+        state.last_trade_time = datetime.now(timezone.utc)
+
+        log.info("Position ouverte")
 
         return True
 
@@ -310,13 +386,19 @@ def open_position(direction, price, epic):
 
         return False
 
+# ==========================================
 # FLASK
+# ==========================================
 
 app = Flask(__name__)
 
-@app.route("/test", methods=["GET"])
-def test():
-    return "TEST OK", 200
+@app.route("/", methods=["GET"])
+def home():
+
+    return jsonify({
+        "status": "Agent IA adaptatif actif",
+        "version": "3.0"
+    })
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -341,12 +423,14 @@ def webhook():
 
         if not can_trade:
 
+            log.info(f"Trading bloqué: {reason}")
+
             return jsonify({
                 "status": "blocked",
                 "reason": reason
-            }), 200
+            })
 
-        should_enter, reason, score, message = (
+        should_enter, score, message = (
             engine.analyze(data)
         )
 
@@ -370,15 +454,14 @@ def webhook():
                     if success
                     else "order_failed"
                 ),
-                "score": score,
-                "message": message
-            }), 200
+                "score": score
+            })
 
         return jsonify({
             "status": "no_trade",
-            "reason": reason,
-            "score": score
-        }), 200
+            "score": score,
+            "message": message
+        })
 
     except Exception as e:
 
@@ -389,17 +472,12 @@ def webhook():
             "message": str(e)
         }), 500
 
-@app.route("/", methods=["GET"])
-def home():
-
-    return jsonify({
-        "status": "Agent Trading actif",
-        "version": "2.8"
-    }), 200
+# ==========================================
+# START
+# ==========================================
 
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
 
     app.run(host="0.0.0.0", port=port)
-
