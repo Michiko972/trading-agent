@@ -55,9 +55,6 @@ class AccountState:
 
     def can_trade(self):
 
-        if self.position_open:
-            return False, "position_already_open"
-
         if self.last_trade_time:
 
             elapsed = (
