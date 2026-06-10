@@ -70,6 +70,15 @@ class AccountState:
 state = AccountState()
 
 # ==========================================
+# DIAGNOSTIC DEMARRAGE
+# ==========================================
+
+log.info("=== DIAGNOSTIC CAPITAL ===")
+log.info(f"API_KEY présente : {bool(API_KEY)}")
+log.info(f"EMAIL présent : {bool(API_EMAIL)}")
+log.info(f"PASSWORD présent : {bool(API_PASSWORD)}")
+
+# ==========================================
 # ENGINE
 # ==========================================
 
@@ -174,7 +183,16 @@ def get_session():
         )
 
         if response.status_code != 200:
+
+            log.error(
+                f"ECHEC CONNEXION CAPITAL | "
+                f"Status={response.status_code} | "
+                f"Response={response.text}"
+            )
+
             return None, None
+
+        log.info("CONNEXION CAPITAL OK")
 
         return (
             response.headers.get("CST"),
@@ -193,6 +211,9 @@ def get_headers():
     cst, xst = get_session()
 
     if not cst or not xst:
+
+        log.error("ECHEC GET_HEADERS | CST ou X-SECURITY-TOKEN manquant")
+
         return None
 
     return {
@@ -222,6 +243,13 @@ def get_market_rules(epic):
         )
 
         if response.status_code != 200:
+
+            log.error(
+                f"ECHEC MARKET RULES | "
+                f"Status={response.status_code} | "
+                f"Response={response.text}"
+            )
+
             return None
 
         market = response.json()
@@ -285,12 +313,21 @@ def calculate_position_size(epic, price, stop_distance, min_size):
 
 def open_position(direction, price, epic):
 
+    log.info("=== OPEN_POSITION ===")
+    log.info(f"Direction : {direction}")
+    log.info(f"Epic : {epic}")
+    log.info(f"Prix : {price}")
+
     headers = get_headers()
+
+    log.info(f"Headers OK : {headers is not None}")
 
     if not headers:
         return False
 
     rules = get_market_rules(epic)
+
+    log.info(f"Rules : {rules}")
 
     if not rules:
         return False
@@ -359,12 +396,14 @@ def open_position(direction, price, epic):
         )
 
         log.info(f"Réponse broker: {response.text}")
+        log.info(f"Status broker : {response.status_code}")
 
         if response.status_code != 200:
 
             log.error(
-                f"Erreur ouverture position | "
-                f"{response.status_code}"
+                f"ECHEC OUVERTURE POSITION | "
+                f"Status={response.status_code} | "
+                f"Response={response.text}"
             )
 
             return False
