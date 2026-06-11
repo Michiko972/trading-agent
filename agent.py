@@ -23,6 +23,16 @@ API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 
 DEFAULT_EPIC = "BTCUSD"
 
+EPIC_MAP = {
+    "NASDAQ": "US100",
+    "NAS100": "US100",
+    "BTCUSD": "BTCUSD",
+    "ETHUSD": "ETHUSD",
+    "EURUSD": "EURUSD",
+    "USDJPY": "USDJPY",
+    "GBPUSD": "GBPUSD",
+}
+
 CAPITAL_DEMO = 1000.0
 RISK_PCT = 0.01
 TP_RATIO = 1.5
@@ -190,49 +200,35 @@ def get_session():
                 f"Response={response.text}"
             )
 
-            return None, None
+            return None
 
         log.info("CONNEXION CAPITAL OK")
 
-        return (
-            response.headers.get("CST"),
-            response.headers.get("X-SECURITY-TOKEN")
-        )
+        cst = response.headers.get("CST")
+        xst = response.headers.get("X-SECURITY-TOKEN")
+
+        if not cst or not xst:
+            log.error("ECHEC GET_HEADERS | CST ou X-SECURITY-TOKEN manquant")
+            return None
+
+        return {
+            "X-CAP-API-KEY": API_KEY,
+            "CST": cst,
+            "X-SECURITY-TOKEN": xst,
+            "Content-Type": "application/json"
+        }
 
     except Exception as e:
 
         log.error(f"Erreur session: {e}")
 
-        return None, None
-
-
-def get_headers():
-
-    cst, xst = get_session()
-
-    if not cst or not xst:
-
-        log.error("ECHEC GET_HEADERS | CST ou X-SECURITY-TOKEN manquant")
-
         return None
-
-    return {
-        "X-CAP-API-KEY": API_KEY,
-        "CST": cst,
-        "X-SECURITY-TOKEN": xst,
-        "Content-Type": "application/json"
-    }
 
 # ==========================================
 # MARKET RULES
 # ==========================================
 
-def get_market_rules(epic):
-
-    headers = get_headers()
-
-    if not headers:
-        return None
+def get_market_rules(epic, headers):
 
     try:
 
@@ -318,14 +314,14 @@ def open_position(direction, price, epic):
     log.info(f"Epic : {epic}")
     log.info(f"Prix : {price}")
 
-    headers = get_headers()
+    headers = get_session()
 
     log.info(f"Headers OK : {headers is not None}")
 
     if not headers:
         return False
 
-    rules = get_market_rules(epic)
+    rules = get_market_rules(epic, headers)
 
     log.info(f"Rules : {rules}")
 
@@ -436,7 +432,32 @@ def home():
         "version": "3.0"
     })
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/search-market", methods=["GET"])
+def search_market():
+
+    term = request.args.get("q", "nasdaq")
+
+    headers = get_session()
+
+    if not headers:
+        return jsonify({"error": "auth failed"}), 500
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/markets",
+            headers=headers,
+            params={"searchTerm": term},
+            timeout=10
+        )
+
+        return jsonify(response.json())
+
+    except Exception as e:
+
+        return jsonify({"error": str(e)}), 500
+
+
 def webhook():
 
     try:
@@ -476,7 +497,10 @@ def webhook():
 
             signal = data.get("signal")
             price = float(data.get("price", 0))
-            epic = data.get("epic", DEFAULT_EPIC)
+            epic_raw = data.get("epic", DEFAULT_EPIC)
+            epic = EPIC_MAP.get(epic_raw, epic_raw)
+
+            log.info(f"Epic reçu: {epic_raw} → converti: {epic}")
 
             success = open_position(
                 signal,
