@@ -351,10 +351,7 @@ def open_position(direction, price, epic):
         stop_level = price + stop_distance
         take_profit = price - (stop_distance * TP_RATIO)
 
-    guaranteed_stop = False
-
-    if "BTC" in epic or "ETH" in epic:
-        guaranteed_stop = True
+    guaranteed_stop = True
 
     size = calculate_position_size(
         epic,
