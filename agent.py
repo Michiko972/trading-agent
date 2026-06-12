@@ -296,7 +296,7 @@ def calculate_position_size(epic, price, stop_distance, min_size):
         size *= 0.05
 
     # NASDAQ
-    elif "NAS" in epic:
+    elif "NAS" in epic or "US100" in epic:
         size *= 0.5
 
     size = round(size, 4)
@@ -332,14 +332,10 @@ def open_position(direction, price, epic):
     min_stop = rules["min_stop"]
     decimals = rules["decimals"]
 
-    # ATR simplifié adaptatif
-
     stop_distance = price * 0.005
 
     if stop_distance < min_stop:
         stop_distance = min_stop
-
-    # Long
 
     if direction == "long":
 
@@ -348,16 +344,12 @@ def open_position(direction, price, epic):
         stop_level = price - stop_distance
         take_profit = price + (stop_distance * TP_RATIO)
 
-    # Short
-
     else:
 
         side = "SELL"
 
         stop_level = price + stop_distance
         take_profit = price - (stop_distance * TP_RATIO)
-
-    # Stop garanti auto
 
     guaranteed_stop = False
 
@@ -391,8 +383,8 @@ def open_position(direction, price, epic):
             timeout=10
         )
 
-        log.info(f"Réponse broker: {response.text}")
         log.info(f"Status broker : {response.status_code}")
+        log.info(f"Réponse broker: {response.text}")
 
         if response.status_code != 200:
 
@@ -457,7 +449,7 @@ def search_market():
 
         return jsonify({"error": str(e)}), 500
 
-
+@app.route("/webhook", methods=["POST"])
 def webhook():
 
     try:
