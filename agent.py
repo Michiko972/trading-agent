@@ -34,7 +34,7 @@ EPIC_MAP = {
 }
 
 CAPITAL_DEMO = 1000.0
-RISK_PCT = 0.01
+RISK_PCT = 0.03
 TP_RATIO = 1.5
 
 # ==========================================
@@ -64,6 +64,9 @@ class AccountState:
         self.last_trade_time = None
 
     def can_trade(self):
+
+        if self.position_open:
+            return False, "position_already_open"
 
         if self.last_trade_time:
 
@@ -98,75 +101,15 @@ class TradingDecisionEngine:
 
         signal = data.get("signal", "")
 
-        adx = float(data.get("adx", 0))
+        # La stratégie Pine Script v8 (EMA + RSI + Stoch + ADX)
+        # filtre déjà toutes les conditions avant d'envoyer le signal.
+        # L'agent fait confiance au signal reçu et ouvre directement.
 
-        adx_rising = data.get("adx_rising", False)
+        if signal in ("long", "short"):
+            log.info(f"Signal {signal} reçu — toutes conditions déjà validées par Pine Script")
+            return True, 100, "Setup validé (filtré en amont)"
 
-        di_plus = float(data.get("di_plus", 0))
-        di_minus = float(data.get("di_minus", 0))
-
-        last_pivot = data.get("last_pivot", "")
-
-        impulse = data.get("impulse", "")
-
-        score = 0
-
-        # ADX
-
-        if adx >= 25:
-            score += 25
-        else:
-            score -= 10
-
-        # ADX rising
-
-        if adx_rising:
-            score += 15
-
-        # LONG
-
-        if signal == "long":
-
-            if di_plus > di_minus:
-                score += 10
-            else:
-                score -= 5
-
-            if last_pivot == "low":
-                score += 20
-            else:
-                score -= 10
-
-            if impulse == "bullish":
-                score += 20
-            else:
-                score -= 5
-
-        # SHORT
-
-        elif signal == "short":
-
-            if di_minus > di_plus:
-                score += 10
-            else:
-                score -= 5
-
-            if last_pivot == "high":
-                score += 20
-            else:
-                score -= 10
-
-            if impulse == "bearish":
-                score += 20
-            else:
-                score -= 5
-
-        log.info(f"Score final: {score}")
-
-        if score >= 55:
-            return True, score, "Setup validé"
-
-        return False, score, "Setup refusé"
+        return False, 0, "Signal invalide"
 
 engine = TradingDecisionEngine()
 
@@ -263,6 +206,12 @@ def get_market_rules(epic, headers):
                 .get("value", 1)
             ),
 
+            "min_guaranteed_stop": float(
+                market["dealingRules"]
+                .get("minGuaranteedStopOrLimitDistance", {})
+                .get("value", 0)
+            ),
+
             "decimals": int(
                 market["snapshot"]
                 .get("decimalPlacesFactor", 2)
@@ -286,18 +235,23 @@ def calculate_position_size(epic, price, stop_distance, min_size):
     if stop_distance <= 0:
         return min_size
 
-    size = risk_amount / stop_distance
+    # Forex (paires non-JPY) : pip = 0.0001, valeur pip = (taille / 100000) * 10
+    # On résout : risk_amount = (stop_distance / 0.0001) * (size / 100000) * 10
+    is_forex = any(p in epic for p in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic and "ETH" not in epic
 
-    # Crypto
-    if "BTC" in epic:
-        size *= 0.01
+    if is_forex:
 
-    elif "ETH" in epic:
-        size *= 0.05
+        pip_size = 0.01 if "JPY" in epic else 0.0001
 
-    # NASDAQ
-    elif "NAS" in epic or "US100" in epic:
-        size *= 0.5
+        stop_pips = stop_distance / pip_size
+
+        # valeur d'un pip pour 100000 unités = 10 (approx, en devise de cotation)
+        size = (risk_amount / stop_pips) * (100000 / 10)
+
+    else:
+
+        # Crypto / indices : risque direct = size * stop_distance
+        size = risk_amount / stop_distance
 
     size = round(size, 4)
 
@@ -306,6 +260,42 @@ def calculate_position_size(epic, price, stop_distance, min_size):
 # ==========================================
 # OPEN POSITION
 # ==========================================
+
+def check_real_positions():
+    """Vérifie auprès de Capital.com si des positions sont réellement ouvertes.
+    Met à jour state.position_open en conséquence."""
+
+    headers = get_session()
+
+    if not headers:
+        log.error("Impossible de vérifier les positions réelles (échec session)")
+        return
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/positions",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            log.error(f"Echec vérification positions | Status={response.status_code}")
+            return
+
+        positions = response.json().get("positions", [])
+
+        if len(positions) == 0:
+            if state.position_open:
+                log.info("Aucune position réelle trouvée — réinitialisation position_open")
+            state.position_open = False
+        else:
+            state.position_open = True
+            log.info(f"Positions réelles ouvertes : {len(positions)}")
+
+    except Exception as e:
+        log.error(f"Erreur check_real_positions: {e}")
+
 
 def open_position(direction, price, epic):
 
@@ -329,13 +319,13 @@ def open_position(direction, price, epic):
         return False
 
     min_size = rules["min_size"]
-    min_stop = rules["min_stop"]
+    min_stop = rules["min_guaranteed_stop"] or rules["min_stop"]
     decimals = rules["decimals"]
 
-    stop_distance = price * 0.005
+    # Distance stop : 1% du prix, mais jamais inférieure au minimum garanti Capital.com
+    stop_distance = max(price * 0.01, min_stop)
 
-    if stop_distance < min_stop:
-        stop_distance = min_stop
+    log.info(f"Stop distance : {stop_distance} (min garanti : {min_stop})")
 
     if direction == "long":
 
@@ -353,51 +343,96 @@ def open_position(direction, price, epic):
 
     guaranteed_stop = True
 
-    size = calculate_position_size(
+    size_total = calculate_position_size(
         epic,
         price,
         stop_distance,
         min_size
     )
 
-    payload = {
+    # Division en 2 positions pour 2 TP différents
+    size_half = round(size_total / 2, 4)
+    size_half = max(size_half, min_size)
+
+    tp1_distance = stop_distance * 1.5
+    tp2_distance = stop_distance * 3.0
+
+    if direction == "long":
+        tp1_level = price + tp1_distance
+        tp2_level = price + tp2_distance
+    else:
+        tp1_level = price - tp1_distance
+        tp2_level = price - tp2_distance
+
+    payload_1 = {
         "epic": epic,
         "direction": side,
-        "size": size,
-        "guaranteedStop": guaranteed_stop,
-        "stopLevel": round(stop_level, decimals),
-        "profitLevel": round(take_profit, decimals)
+        "size": size_half,
+        "guaranteedStop": True,
+        "stopDistance": round(stop_distance, decimals),
+        "profitDistance": round(tp1_distance, decimals)
     }
 
-    log.info(f"Payload ordre: {payload}")
+    payload_2 = {
+        "epic": epic,
+        "direction": side,
+        "size": size_half,
+        "guaranteedStop": True,
+        "stopDistance": round(stop_distance, decimals),
+        "profitDistance": round(tp2_distance, decimals)
+    }
+
+    log.info(f"Payload TP1 (1.5x): {payload_1}")
+    log.info(f"Payload TP2 (3x): {payload_2}")
 
     try:
 
-        response = requests.post(
+        response_1 = requests.post(
             f"{API_URL}/positions",
             headers=headers,
-            json=payload,
+            json=payload_1,
             timeout=10
         )
 
-        log.info(f"Status broker : {response.status_code}")
-        log.info(f"Réponse broker: {response.text}")
+        log.info(f"Status broker TP1 : {response_1.status_code}")
+        log.info(f"Réponse broker TP1: {response_1.text}")
 
-        if response.status_code != 200:
+        success_1 = response_1.status_code == 200
 
+        if not success_1:
             log.error(
-                f"ECHEC OUVERTURE POSITION | "
-                f"Status={response.status_code} | "
-                f"Response={response.text}"
+                f"ECHEC OUVERTURE POSITION TP1 | "
+                f"Status={response_1.status_code} | "
+                f"Response={response_1.text}"
             )
 
+        response_2 = requests.post(
+            f"{API_URL}/positions",
+            headers=headers,
+            json=payload_2,
+            timeout=10
+        )
+
+        log.info(f"Status broker TP2 : {response_2.status_code}")
+        log.info(f"Réponse broker TP2: {response_2.text}")
+
+        success_2 = response_2.status_code == 200
+
+        if not success_2:
+            log.error(
+                f"ECHEC OUVERTURE POSITION TP2 | "
+                f"Status={response_2.status_code} | "
+                f"Response={response_2.text}"
+            )
+
+        if not success_1 and not success_2:
             return False
 
         state.position_open = True
         state.position_side = direction
         state.last_trade_time = datetime.now(timezone.utc)
 
-        log.info("Position ouverte")
+        log.info("Position(s) ouverte(s)")
 
         return True
 
@@ -464,6 +499,8 @@ def webhook():
         data = json.loads(raw_data)
 
         log.info(f"Signal reçu: {json.dumps(data)}")
+
+        check_real_positions()
 
         can_trade, reason = state.can_trade()
 
