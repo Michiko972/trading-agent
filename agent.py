@@ -415,96 +415,51 @@ def open_position(direction, price, epic, headers=None):
 
     guaranteed_stop = True
 
-    size_total = calculate_position_size(
+    size = calculate_position_size(
         epic,
         price,
         stop_distance,
         min_size
     )
 
-    # Division en 2 positions pour 2 TP différents
-    size_half = round(size_total / 2, 4)
-    size_half = max(size_half, min_size)
-
-    tp1_distance = stop_distance * 1.5
-    tp2_distance = stop_distance * 3.0
-
-    if direction == "long":
-        tp1_level = price + tp1_distance
-        tp2_level = price + tp2_distance
-    else:
-        tp1_level = price - tp1_distance
-        tp2_level = price - tp2_distance
-
-    payload_1 = {
+    payload = {
         "epic": epic,
         "direction": side,
-        "size": size_half,
+        "size": size,
         "guaranteedStop": True,
         "stopDistance": round(stop_distance, decimals),
-        "profitDistance": round(tp1_distance, decimals)
+        "profitDistance": round(stop_distance * TP_RATIO, decimals)
     }
 
-    payload_2 = {
-        "epic": epic,
-        "direction": side,
-        "size": size_half,
-        "guaranteedStop": True,
-        "stopDistance": round(stop_distance, decimals),
-        "profitDistance": round(tp2_distance, decimals)
-    }
-
-    log.info(f"Payload TP1 (1.5x): {payload_1}")
-    log.info(f"Payload TP2 (3x): {payload_2}")
+    log.info(f"Payload ordre: {payload}")
 
     try:
 
-        response_1 = requests.post(
+        response = requests.post(
             f"{API_URL}/positions",
             headers=headers,
-            json=payload_1,
+            json=payload,
             timeout=10
         )
 
-        log.info(f"Status broker TP1 : {response_1.status_code}")
-        log.info(f"Réponse broker TP1: {response_1.text}")
+        log.info(f"Status broker : {response.status_code}")
+        log.info(f"Réponse broker: {response.text}")
 
-        success_1 = response_1.status_code == 200
+        if response.status_code != 200:
 
-        if not success_1:
             log.error(
-                f"ECHEC OUVERTURE POSITION TP1 | "
-                f"Status={response_1.status_code} | "
-                f"Response={response_1.text}"
+                f"ECHEC OUVERTURE POSITION | "
+                f"Status={response.status_code} | "
+                f"Response={response.text}"
             )
 
-        response_2 = requests.post(
-            f"{API_URL}/positions",
-            headers=headers,
-            json=payload_2,
-            timeout=10
-        )
-
-        log.info(f"Status broker TP2 : {response_2.status_code}")
-        log.info(f"Réponse broker TP2: {response_2.text}")
-
-        success_2 = response_2.status_code == 200
-
-        if not success_2:
-            log.error(
-                f"ECHEC OUVERTURE POSITION TP2 | "
-                f"Status={response_2.status_code} | "
-                f"Response={response_2.text}"
-            )
-
-        if not success_1 and not success_2:
             return False
 
         state.position_open = True
         state.position_side = direction
         state.last_trade_time = datetime.now(timezone.utc)
 
-        log.info("Position(s) ouverte(s)")
+        log.info("Position ouverte")
 
         return True
 
