@@ -438,19 +438,16 @@ def open_position(direction, price, epic, headers=None, atr=None):
     min_stop_raw = rules["min_guaranteed_stop"] or rules["min_stop"]
     decimals = rules["decimals"]
 
-    # Garde-fou : si min_stop_raw dépasse 5% du prix, c'est probablement
-    # une unité incohérente (ex: min_stop=1.0 sur EURUSD = 10000 pips).
-    # On l'ignore dans ce cas et on se base uniquement sur notre propre calcul.
-    if min_stop_raw > price * 0.05:
-        log.info(f"min_stop ({min_stop_raw}) semble disproportionné par rapport au prix ({price}) — ignoré")
-        min_stop = 0
-    else:
-        min_stop = min_stop_raw
+    # On ignore complètement min_stop de Capital.com pour le calcul du stop —
+    # son unité s'est révélée incohérente sur plusieurs marchés (donnait des
+    # stops de 1000+ pips). On se base uniquement sur notre propre pourcentage,
+    # cohérent avec un trade de 2 minutes.
+    log.info(f"min_stop brut Capital.com (ignoré) : {min_stop_raw}")
 
     # Distance stop : 0.3% du prix (cohérent avec un timeframe court de 2 minutes)
-    stop_distance = max(price * 0.003, min_stop)
+    stop_distance = price * 0.003
 
-    log.info(f"Stop distance utilisé : {stop_distance} (min_stop brut Capital.com : {min_stop_raw})")
+    log.info(f"Stop distance utilisé : {stop_distance}")
 
     is_forex_pair = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic and "ETH" not in epic
 
