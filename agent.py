@@ -261,15 +261,17 @@ def calculate_position_size(epic, price, stop_distance, min_size):
 # OPEN POSITION
 # ==========================================
 
-def check_real_positions():
+def check_real_positions(headers=None):
     """Vérifie auprès de Capital.com si des positions sont réellement ouvertes.
-    Met à jour state.position_open en conséquence."""
+    Met à jour state.position_open en conséquence.
+    Retourne les headers utilisés (pour réutilisation immédiate)."""
 
-    headers = get_session()
+    if not headers:
+        headers = get_session()
 
     if not headers:
         log.error("Impossible de vérifier les positions réelles (échec session)")
-        return
+        return None
 
     try:
 
@@ -281,7 +283,7 @@ def check_real_positions():
 
         if response.status_code != 200:
             log.error(f"Echec vérification positions | Status={response.status_code}")
-            return
+            return headers
 
         positions = response.json().get("positions", [])
 
@@ -293,18 +295,79 @@ def check_real_positions():
             state.position_open = True
             log.info(f"Positions réelles ouvertes : {len(positions)}")
 
+        return headers
+
     except Exception as e:
         log.error(f"Erreur check_real_positions: {e}")
+        return headers
 
 
-def open_position(direction, price, epic):
+def close_all_positions(headers=None):
+    """Ferme toutes les positions ouvertes sur Capital.com."""
+
+    if not headers:
+        headers = get_session()
+
+    if not headers:
+        log.error("Impossible de fermer les positions (échec session)")
+        return False
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/positions",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            log.error(f"Echec récupération positions pour fermeture | Status={response.status_code}")
+            return False
+
+        positions = response.json().get("positions", [])
+
+        if len(positions) == 0:
+            log.info("Aucune position à fermer")
+            return True
+
+        all_closed = True
+
+        for pos in positions:
+
+            deal_id = pos.get("position", {}).get("dealId")
+
+            if not deal_id:
+                continue
+
+            close_response = requests.delete(
+                f"{API_URL}/positions/{deal_id}",
+                headers=headers,
+                timeout=10
+            )
+
+            log.info(f"Fermeture position {deal_id} | Status={close_response.status_code} | {close_response.text}")
+
+            if close_response.status_code != 200:
+                all_closed = False
+
+        state.position_open = False
+
+        return all_closed
+
+    except Exception as e:
+        log.error(f"Erreur close_all_positions: {e}")
+        return False
+
+
+def open_position(direction, price, epic, headers=None):
 
     log.info("=== OPEN_POSITION ===")
     log.info(f"Direction : {direction}")
     log.info(f"Epic : {epic}")
     log.info(f"Prix : {price}")
 
-    headers = get_session()
+    if not headers:
+        headers = get_session()
 
     log.info(f"Headers OK : {headers is not None}")
 
@@ -324,6 +387,15 @@ def open_position(direction, price, epic):
 
     # Distance stop : 1% du prix, mais jamais inférieure au minimum garanti Capital.com
     stop_distance = max(price * 0.01, min_stop)
+
+    is_forex_pair = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic and "ETH" not in epic
+
+    if is_forex_pair:
+        pip_size = 0.01 if "JPY" in epic else 0.0001
+        min_stop_pips = min_stop / pip_size
+        stop_distance_pips = stop_distance / pip_size
+        log.info(f"Min stop garanti : {min_stop} = {min_stop_pips:.1f} pips")
+        log.info(f"Stop distance utilisé : {stop_distance} = {stop_distance_pips:.1f} pips")
 
     log.info(f"Stop distance : {stop_distance} (min garanti : {min_stop})")
 
@@ -500,7 +572,33 @@ def webhook():
 
         log.info(f"Signal reçu: {json.dumps(data)}")
 
-        check_real_positions()
+        signal_type = data.get("signal")
+
+        session_headers = check_real_positions()
+
+        # Signal de sortie : ferme seulement si la position correspond au bon sens
+        if signal_type in ("exit_long", "exit_short"):
+
+            if not state.position_open:
+                log.info(f"{signal_type} reçu mais aucune position ouverte")
+                return jsonify({"status": "no_position_to_close"})
+
+            expected_side = "long" if signal_type == "exit_long" else "short"
+
+            if state.position_side != expected_side:
+                log.info(
+                    f"{signal_type} reçu mais position actuelle est {state.position_side} "
+                    f"— signal ignoré (pas le bon sens)"
+                )
+                return jsonify({"status": "exit_signal_ignored_wrong_side"})
+
+            log.info(f"=== {signal_type.upper()} — fermeture des positions ===")
+
+            closed = close_all_positions(headers=session_headers)
+
+            return jsonify({
+                "status": "positions_closed" if closed else "close_failed"
+            })
 
         can_trade, reason = state.can_trade()
 
@@ -531,7 +629,8 @@ def webhook():
             success = open_position(
                 signal,
                 price,
-                epic
+                epic,
+                headers=session_headers
             )
 
             return jsonify({
