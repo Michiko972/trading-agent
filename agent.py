@@ -359,7 +359,7 @@ def close_all_positions(headers=None):
         return False
 
 
-def open_position(direction, price, epic, headers=None):
+def open_position(direction, price, epic, headers=None, atr=None):
 
     log.info("=== OPEN_POSITION ===")
     log.info(f"Direction : {direction}")
@@ -385,8 +385,14 @@ def open_position(direction, price, epic, headers=None):
     min_stop = rules["min_guaranteed_stop"] or rules["min_stop"]
     decimals = rules["decimals"]
 
-    # Distance stop : 1% du prix, mais jamais inférieure au minimum garanti Capital.com
-    stop_distance = max(price * 0.01, min_stop)
+    # Distance stop basée sur l'ATR (volatilité réelle) si fourni par Pine Script
+    # Sinon fallback sur 1% du prix
+    if atr and atr > 0:
+        stop_distance = max(atr * 1.5, min_stop)
+        log.info(f"Stop basé sur ATR : {atr} x 1.5 = {atr * 1.5}")
+    else:
+        stop_distance = max(price * 0.01, min_stop)
+        log.info("ATR non fourni, fallback sur 1% du prix")
 
     is_forex_pair = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic and "ETH" not in epic
 
@@ -576,16 +582,19 @@ def webhook():
 
             signal = data.get("signal")
             price = float(data.get("price", 0))
+            atr = float(data.get("atr", 0)) or None
             epic_raw = data.get("epic", DEFAULT_EPIC)
             epic = EPIC_MAP.get(epic_raw, epic_raw)
 
             log.info(f"Epic reçu: {epic_raw} → converti: {epic}")
+            log.info(f"ATR reçu: {atr}")
 
             success = open_position(
                 signal,
                 price,
                 epic,
-                headers=session_headers
+                headers=session_headers,
+                atr=atr
             )
 
             return jsonify({
