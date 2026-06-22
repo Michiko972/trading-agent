@@ -224,6 +224,59 @@ def get_market_rules(epic, headers):
 
         return None
 
+
+def calculate_atr(epic, headers, period=14, resolution="MINUTE_2"):
+    """Calcule l'ATR (Average True Range) à partir des bougies récentes
+    récupérées directement depuis Capital.com."""
+
+    try:
+
+        response = requests.get(
+            f"{API_URL}/prices/{epic}",
+            headers=headers,
+            params={
+                "resolution": resolution,
+                "max": period + 1
+            },
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            log.error(f"ECHEC RECUPERATION BOUGIES | Status={response.status_code} | {response.text}")
+            return None
+
+        prices = response.json().get("prices", [])
+
+        if len(prices) < 2:
+            log.error("Pas assez de bougies pour calculer l'ATR")
+            return None
+
+        true_ranges = []
+
+        for i in range(1, len(prices)):
+
+            high = float(prices[i]["highPrice"]["bid"])
+            low = float(prices[i]["lowPrice"]["bid"])
+            prev_close = float(prices[i - 1]["closePrice"]["bid"])
+
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close)
+            )
+
+            true_ranges.append(tr)
+
+        atr = sum(true_ranges) / len(true_ranges)
+
+        log.info(f"ATR calculé sur {len(true_ranges)} bougies ({resolution}) : {atr}")
+
+        return atr
+
+    except Exception as e:
+        log.error(f"Erreur calculate_atr: {e}")
+        return None
+
 # ==========================================
 # POSITION SIZE
 # ==========================================
@@ -382,17 +435,22 @@ def open_position(direction, price, epic, headers=None, atr=None):
         return False
 
     min_size = rules["min_size"]
-    min_stop = rules["min_guaranteed_stop"] or rules["min_stop"]
+    min_stop_raw = rules["min_guaranteed_stop"] or rules["min_stop"]
     decimals = rules["decimals"]
 
-    # Distance stop basée sur l'ATR (volatilité réelle) si fourni par Pine Script
-    # Sinon fallback sur 1% du prix
-    if atr and atr > 0:
-        stop_distance = max(atr * 1.5, min_stop)
-        log.info(f"Stop basé sur ATR : {atr} x 1.5 = {atr * 1.5}")
+    # Garde-fou : si min_stop_raw dépasse 5% du prix, c'est probablement
+    # une unité incohérente (ex: min_stop=1.0 sur EURUSD = 10000 pips).
+    # On l'ignore dans ce cas et on se base uniquement sur notre propre calcul.
+    if min_stop_raw > price * 0.05:
+        log.info(f"min_stop ({min_stop_raw}) semble disproportionné par rapport au prix ({price}) — ignoré")
+        min_stop = 0
     else:
-        stop_distance = max(price * 0.01, min_stop)
-        log.info("ATR non fourni, fallback sur 1% du prix")
+        min_stop = min_stop_raw
+
+    # Distance stop : 0.3% du prix (cohérent avec un timeframe court de 2 minutes)
+    stop_distance = max(price * 0.003, min_stop)
+
+    log.info(f"Stop distance utilisé : {stop_distance} (min_stop brut Capital.com : {min_stop_raw})")
 
     is_forex_pair = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic and "ETH" not in epic
 
