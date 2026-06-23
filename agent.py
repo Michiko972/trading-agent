@@ -1,6 +1,6 @@
 """
-Agent Trading IA v4.0 — Strategie Range Filter Momentum Strict
-Version Prop Firm : Verification en temps reel des positions sur le Broker
+Agent Trading IA v4.5 — Strategie & Gestion du Risque Topstep $50,000 (Mode Acceleré)
+Securite Globale: Max 1 Position | Risque Max $400 par Trade | Cooldown 30 min
 TradingView -> Railway -> Capital.com
 """
 
@@ -25,11 +25,10 @@ EPIC_MAP = {
     "ETHUSD": "ETHUSD", "EURUSD": "EURUSD", "USDJPY": "USDJPY", "GBPUSD": "GBPUSD"
 }
 
-# PARAMETRES FINANCIERS PROP FIRM
-CAPITAL_DEMO = 41000.0  
-RISK_PCT = 0.01         # 1% du capital par trade
-SL_PCT = 0.0006         # Stop Loss serré : 0.06%
-TP_RATIO = 1.5          # Ratio 1.5x (TP = 0.09%)
+# CONFIGURATION FINANCIERE STRATEGIE TOPSTEP ACCELEREE
+RISK_PER_TRADE_USD = 400.0  # Risque passe a $400 pour atteindre l'objectif plus rapidement
+SL_POINTS = 15.0            # Distance fixe du Stop Loss (15 points / pips)
+TP_POINTS = 22.5            # Distance fixe du Take Profit (22.5 points / pips) -> Gain cible de $600
 
 # ==========================================
 # GESTION DES LOGS
@@ -38,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger(__name__)
 
 # ==========================================
-# ETAT DE L'AGENT (COOLDOWN)
+# ETAT DE L'AGENT (COOLDOWN STRAGÉGIQUE)
 # ==========================================
 class AccountState:
     def __init__(self):
@@ -47,8 +46,8 @@ class AccountState:
     def can_trade(self):
         if self.last_trade_time:
             elapsed = (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
-            if elapsed < 120:  # Cooldown de 2 minutes de sécurité
-                return False, "cooldown"
+            if elapsed < 1800:  # Cooldown de 30 minutes (1800 secondes) pour eviter l'overtrading
+                return False, f"cooldown_active_{int((1800-elapsed)/60)}_min_remaining"
         return True, "ok"
 
 state = AccountState()
@@ -77,19 +76,18 @@ def get_session():
         log.error(f"Erreur lors de la creation de session : {e}")
         return None
 
-def check_active_positions(epic, headers):
-    """Verifie directement chez le broker s'il y a un trade en cours sur cet actif"""
+def check_any_active_position(headers):
+    """VERROW TOTAL PROP FIRM : Renvoie True s'il y a la moindre position ouverte sur le compte"""
     try:
         response = requests.get(f"{API_URL}/positions", headers=headers, timeout=10)
         if response.status_code == 200:
             positions = response.json().get("positions", [])
-            for pos in positions:
-                if pos.get("market", {}).get("epic") == epic:
-                    return True  # Une position existe deja sur cet actif
+            if len(positions) > 0:
+                return True
         return False
     except Exception as e:
-        log.error(f"Erreur lors de la verification des positions : {e}")
-        return True  # Par securite, on bloque si l'API ne repond pas
+        log.error(f"Erreur lors de la verification globale des positions : {e}")
+        return True
 
 def get_market_rules(epic, headers):
     try:
@@ -105,31 +103,35 @@ def get_market_rules(epic, headers):
         return None
 
 # ==========================================
-# EXECUTION DE L'ORDRE
+# EXECUTION DE L'ORDRE AVEC RISK MANAGEMENT
 # ==========================================
 def open_position(direction, price, epic, headers):
     rules = get_market_rules(epic, headers)
     if not rules: return False
 
-    stop_distance = max(price * SL_PCT, rules["min_stop"])
-    risk_amount = CAPITAL_DEMO * RISK_PCT
-    size = max(round(risk_amount / stop_distance, 4), rules["min_size"])
+    stop_distance = max(SL_POINTS, rules["min_stop"])
+    profit_distance = max(TP_POINTS, rules["min_stop"] * 1.5)
+    
+    # CALCUL ALGORITHMIQUE DE LA TAILLE DES LOTS
+    # Taille = Risque souhaite en dollars ($400) / distance du Stop Loss
+    size = max(round(RISK_PER_TRADE_USD / stop_distance, 4), rules["min_size"])
     side = "BUY" if direction == "long" else "SELL"
 
     payload = {
         "epic": epic,
         "direction": side,
         "size": size,
-        "guaranteedStop": "true",
+        "guaranteedStop": "true",  # Protection absolue et obligatoire contre le slippage
         "stopDistance": round(stop_distance, rules["decimals"]),
-        "profitDistance": round(stop_distance * TP_RATIO, rules["decimals"])
+        "profitDistance": round(profit_distance, rules["decimals"])
     }
 
     try:
         res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
             state.last_trade_time = datetime.now(timezone.utc)
-            log.info(f"ORDRE EXECUTE AVEC SUCCES | {side} {size} {epic}")
+            log.info(f"ORDRE STRATEGIQUE TOPSTEP ENVOYE | {side} {size} {epic}")
+            log.info(f"PARAMETRES | SL: {stop_distance} pts (~$400) | TP: {profit_distance} pts (~$600)")
             return True
         log.error(f"REJET PAR LE BROKER | Code: {res.status_code} | Reponse: {res.text}")
         return False
@@ -144,7 +146,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Agent IA Synchro Live Actif", "version": "4.0"})
+    return jsonify({"status": "Agent Strat Topstep Mode Accelere Actif", "version": "4.5"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -158,25 +160,25 @@ def webhook():
         if not headers: 
             return jsonify({"status": "error", "message": "Authentication failed"}), 500
 
-        # 1. VERIFICATION REELLE SUR LE BROKER (Anti-chevauchement strict)
-        if check_active_positions(epic, headers):
-            log.warning(f"Signal ignore : Une position est deja en cours sur {epic} chez Capital.com.")
-            return jsonify({"status": "blocked", "reason": "position_already_open_on_broker"})
+        # 1. VERROU COMPTE VIDE REEL (Maximum 1 position active sur tout le compte)
+        if check_any_active_position(headers):
+            log.warning("Signal ignore : Une position est deja en cours sur le compte.")
+            return jsonify({"status": "blocked", "reason": "account_has_open_position"})
 
-        # 2. FILTRE SECURITE : Cooldown temporel interne
+        # 2. FILTRE SECURITE : Cooldown temporel interne de 30 minutes
         can_trade, reason = state.can_trade()
         if not can_trade:
             log.warning(f"Signal refuse : {reason}")
             return jsonify({"status": "blocked", "reason": reason})
 
-        # 3. ENVOI DE L'ORDRE SI TOUT EST OK
+        # 3. ENVOI SI LE FEU EST VERT
         if signal in ("long", "short"):
             success = open_position(signal, price, epic, headers)
             return jsonify({"status": "processed", "success": success})
 
         return jsonify({"status": "ignored", "reason": "unknown_signal"})
     except Exception as e:
-        log.error(f"Erreur critique lors de la reception du Webhook : {e}")
+        log.error(f"Erreur critique Webhook : {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
