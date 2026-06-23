@@ -1,6 +1,6 @@
 """
-Agent Trading IA v4.5 — Strategie & Gestion du Risque Topstep $50,000 (Mode Acceleré)
-Securite Globale: Max 1 Position | Risque Max $400 par Trade | Cooldown 30 min
+Agent Trading IA v4.7 — Strategie & Gestion du Risque Topstep $50,000
+Securite Globale: Max 1 Position | Risque Max $400 par Trade | Correctif Port Railway
 TradingView -> Railway -> Capital.com
 """
 
@@ -26,9 +26,9 @@ EPIC_MAP = {
 }
 
 # CONFIGURATION FINANCIERE STRATEGIE TOPSTEP ACCELEREE
-RISK_PER_TRADE_USD = 400.0  # Risque passe a $400 pour atteindre l'objectif plus rapidement
-SL_POINTS = 15.0            # Distance fixe du Stop Loss (15 points / pips)
-TP_POINTS = 22.5            # Distance fixe du Take Profit (22.5 points / pips) -> Gain cible de $600
+RISK_PER_TRADE_USD = 400.0  
+SL_POINTS = 15.0            
+TP_POINTS = 22.5            
 
 # ==========================================
 # GESTION DES LOGS
@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger(__name__)
 
 # ==========================================
-# ETAT DE L'AGENT (COOLDOWN STRAGÉGIQUE)
+# ETAT DE L'AGENT (COOLDOWN STRATEGIE)
 # ==========================================
 class AccountState:
     def __init__(self):
@@ -46,7 +46,7 @@ class AccountState:
     def can_trade(self):
         if self.last_trade_time:
             elapsed = (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
-            if elapsed < 1800:  # Cooldown de 30 minutes (1800 secondes) pour eviter l'overtrading
+            if elapsed < 1800:  
                 return False, f"cooldown_active_{int((1800-elapsed)/60)}_min_remaining"
         return True, "ok"
 
@@ -77,7 +77,6 @@ def get_session():
         return None
 
 def check_any_active_position(headers):
-    """VERROW TOTAL PROP FIRM : Renvoie True s'il y a la moindre position ouverte sur le compte"""
     try:
         response = requests.get(f"{API_URL}/positions", headers=headers, timeout=10)
         if response.status_code == 200:
@@ -112,8 +111,6 @@ def open_position(direction, price, epic, headers):
     stop_distance = max(SL_POINTS, rules["min_stop"])
     profit_distance = max(TP_POINTS, rules["min_stop"] * 1.5)
     
-    # CALCUL ALGORITHMIQUE DE LA TAILLE DES LOTS
-    # Taille = Risque souhaite en dollars ($400) / distance du Stop Loss
     size = max(round(RISK_PER_TRADE_USD / stop_distance, 4), rules["min_size"])
     side = "BUY" if direction == "long" else "SELL"
 
@@ -121,7 +118,7 @@ def open_position(direction, price, epic, headers):
         "epic": epic,
         "direction": side,
         "size": size,
-        "guaranteedStop": "true",  # Protection absolue et obligatoire contre le slippage
+        "guaranteedStop": True,  
         "stopDistance": round(stop_distance, rules["decimals"]),
         "profitDistance": round(profit_distance, rules["decimals"])
     }
@@ -130,8 +127,7 @@ def open_position(direction, price, epic, headers):
         res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
             state.last_trade_time = datetime.now(timezone.utc)
-            log.info(f"ORDRE STRATEGIQUE TOPSTEP ENVOYE | {side} {size} {epic}")
-            log.info(f"PARAMETRES | SL: {stop_distance} pts (~$400) | TP: {profit_distance} pts (~$600)")
+            log.info(f"ORDRE REALISE AVEC SUCCES | {side} {size} {epic}")
             return True
         log.error(f"REJET PAR LE BROKER | Code: {res.status_code} | Reponse: {res.text}")
         return False
@@ -146,7 +142,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Agent Strat Topstep Mode Accelere Actif", "version": "4.5"})
+    return jsonify({"status": "Agent Strat Topstep Mode Accelere Actif", "version": "4.7"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -160,18 +156,15 @@ def webhook():
         if not headers: 
             return jsonify({"status": "error", "message": "Authentication failed"}), 500
 
-        # 1. VERROU COMPTE VIDE REEL (Maximum 1 position active sur tout le compte)
         if check_any_active_position(headers):
             log.warning("Signal ignore : Une position est deja en cours sur le compte.")
             return jsonify({"status": "blocked", "reason": "account_has_open_position"})
 
-        # 2. FILTRE SECURITE : Cooldown temporel interne de 30 minutes
         can_trade, reason = state.can_trade()
         if not can_trade:
             log.warning(f"Signal refuse : {reason}")
             return jsonify({"status": "blocked", "reason": reason})
 
-        # 3. ENVOI SI LE FEU EST VERT
         if signal in ("long", "short"):
             success = open_position(signal, price, epic, headers)
             return jsonify({"status": "processed", "success": success})
@@ -181,5 +174,10 @@ def webhook():
         log.error(f"Erreur critique Webhook : {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ==========================================
+# POINT D'ENTREE ADAPTE A RAILWAY
+# ==========================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    # Recupere dynamiquement le port injecte par Railway (ex: 8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
