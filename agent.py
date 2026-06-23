@@ -1,5 +1,5 @@
 """
-Agent Trading IA v3.6 — Strategie Range Filter Momentum Strict
+Agent Trading IA v3.7 — Strategie Range Filter Momentum Strict
 TradingView -> Railway -> Capital.com
 """
 
@@ -93,7 +93,7 @@ def get_market_rules(epic, headers):
         return None
 
 # ==========================================
-# EXECUTION DES ORDRES (ENTREE AVEC TP/SL)
+# EXECUTION DES ORDRES (ENTREE AVEC TP/SL GARANTI)
 # ==========================================
 def open_position(direction, price, epic, headers):
     rules = get_market_rules(epic, headers)
@@ -107,11 +107,12 @@ def open_position(direction, price, epic, headers):
     size = max(round(risk_amount / stop_distance, 4), rules["min_size"])
     side = "BUY" if direction == "long" else "SELL"
 
+    # Payload mis a jour avec "guaranteedStop": "true" pour Capital.com Europe
     payload = {
         "epic": epic,
         "direction": side,
         "size": size,
-        "guaranteedStop": "false",
+        "guaranteedStop": "true",  # Active obligatoirement le stop garanti exigé
         "stopDistance": round(stop_distance, rules["decimals"]),
         "profitDistance": round(stop_distance * TP_RATIO, rules["decimals"])
     }
@@ -122,7 +123,7 @@ def open_position(direction, price, epic, headers):
             state.position_open = True
             state.position_side = direction
             state.last_trade_time = datetime.now(timezone.utc)
-            log.info(f"ORDRE REALISE AVEC SUCCES | {side} {size} {epic} (SL/TP positionnes)")
+            log.info(f"ORDRE REALISE AVEC SUCCES | {side} {size} {epic} (Stop Garanti applique)")
             return True
         log.error(f"REJET PAR LE BROKER | Code: {res.status_code} | Reponse: {res.text}")
         return False
@@ -137,7 +138,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Agent IA Range Filter Connecte", "version": "3.6"})
+    return jsonify({"status": "Agent IA Range Filter Connecte", "version": "3.7"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -157,7 +158,7 @@ def webhook():
             log.warning(f"Signal refuse : {reason}")
             return jsonify({"status": "blocked", "reason": reason})
 
-        # DECLENCHEMENT DES ENTREES STRSTÉGIQUES
+        # DECLENCHEMENT DES ENTREES STRATEGIQUES
         if signal in ("long", "short"):
             success = open_position(signal, price, epic, headers)
             return jsonify({"status": "processed", "success": success})
