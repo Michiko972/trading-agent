@@ -1,5 +1,6 @@
 """
-Agent Trading IA v3.7 — Strategie Range Filter Momentum Strict
+Agent Trading IA v3.9 — Strategie Range Filter Momentum Strict
+Version Calibree : Capital Reel 41k & Objectifs Serres (Prop Firm)
 TradingView -> Railway -> Capital.com
 """
 
@@ -24,9 +25,11 @@ EPIC_MAP = {
     "ETHUSD": "ETHUSD", "EURUSD": "EURUSD", "USDJPY": "USDJPY", "GBPUSD": "GBPUSD"
 }
 
-CAPITAL_DEMO = 1000.0
-RISK_PCT = 0.03   # Gestion stricte du risque : 3% du capital par trade
-TP_RATIO = 1.5    # Ratio R:R (Si SL = 0.3%, alors TP = 0.45%)
+# CONFIGURATION FINANCIERE AJUSTEE A TON SOLDE REEL
+CAPITAL_DEMO = 41000.0  # Calibre sur ton solde actuel d'environ 40999
+RISK_PCT = 0.01         # Risque strict : 1% du capital max par trade ($410)
+SL_PCT = 0.0006         # Stop Loss serre : 0.06% du prix d'entree
+TP_RATIO = 1.5          # Ratio R:R (Si SL = 0.06%, alors TP = 0.09%)
 
 # ==========================================
 # GESTION DES LOGS
@@ -49,7 +52,7 @@ class AccountState:
             return False, "position_already_open"
         if self.last_trade_time:
             elapsed = (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
-            if elapsed < 120:  # Cooldown de 2 minutes entre deux ordres
+            if elapsed < 120:  # Cooldown de 2 minutes
                 return False, "cooldown"
         return True, "ok"
 
@@ -99,20 +102,19 @@ def open_position(direction, price, epic, headers):
     rules = get_market_rules(epic, headers)
     if not rules: return False
 
-    # Calcul du Stop Loss : Fixe a 0.3% du prix d'entree
-    stop_distance = max(price * 0.003, rules["min_stop"])
+    # Calcul du Stop Loss adapte au capital et au compte risque limite
+    stop_distance = max(price * SL_PCT, rules["min_stop"])
     
-    # Calcul de la taille de la position liee au risque de 3%
+    # Taille de la position indexee sur ton capital de 41k
     risk_amount = state.capital * RISK_PCT
     size = max(round(risk_amount / stop_distance, 4), rules["min_size"])
     side = "BUY" if direction == "long" else "SELL"
 
-    # Payload mis a jour avec "guaranteedStop": "true" pour Capital.com Europe
     payload = {
         "epic": epic,
         "direction": side,
         "size": size,
-        "guaranteedStop": "true",  # Active obligatoirement le stop garanti exigé
+        "guaranteedStop": "true",  # Strict respect du compte Europe
         "stopDistance": round(stop_distance, rules["decimals"]),
         "profitDistance": round(stop_distance * TP_RATIO, rules["decimals"])
     }
@@ -123,7 +125,7 @@ def open_position(direction, price, epic, headers):
             state.position_open = True
             state.position_side = direction
             state.last_trade_time = datetime.now(timezone.utc)
-            log.info(f"ORDRE REALISE AVEC SUCCES | {side} {size} {epic} (Stop Garanti applique)")
+            log.info(f"ORDRE CALIBRE EFFECTUE | {side} {size} {epic} (Stop Garanti calcule sur 41k)")
             return True
         log.error(f"REJET PAR LE BROKER | Code: {res.status_code} | Reponse: {res.text}")
         return False
@@ -138,7 +140,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Agent IA Range Filter Connecte", "version": "3.7"})
+    return jsonify({"status": "Agent IA Option Prop Firm Actif", "version": "3.9"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -152,13 +154,11 @@ def webhook():
         if not headers: 
             return jsonify({"status": "error", "message": "Authentication failed"}), 500
 
-        # FILTRE SECURITE : Verification de la disponibilite de l'agent
         can_trade, reason = state.can_trade()
         if not can_trade:
             log.warning(f"Signal refuse : {reason}")
             return jsonify({"status": "blocked", "reason": reason})
 
-        # DECLENCHEMENT DES ENTREES STRATEGIQUES
         if signal in ("long", "short"):
             success = open_position(signal, price, epic, headers)
             return jsonify({"status": "processed", "success": success})
@@ -169,5 +169,4 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    # Liaison au port Railway standard
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
