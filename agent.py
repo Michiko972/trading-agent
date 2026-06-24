@@ -26,9 +26,9 @@ EPIC_MAP = {
 }
 
 # CONFIGURATION FINANCIERE STRATEGIE TOPSTEP ACCELEREE
-RISK_PER_TRADE_USD = 400.0  
-SL_POINTS = 15.0            
-TP_POINTS = 22.5            
+RISK_PER_TRADE_USD = 400.0  # Risque de $400 par trade
+SL_POINTS = 15.0            # Distance fixe du Stop Loss (15 points / pips)
+TP_POINTS = 22.5            # Distance fixe du Take Profit (22.5 points / pips) -> Gain de $600
 
 # ==========================================
 # GESTION DES LOGS
@@ -46,7 +46,7 @@ class AccountState:
     def can_trade(self):
         if self.last_trade_time:
             elapsed = (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
-            if elapsed < 1800:  
+            if elapsed < 1800:  # Cooldown de 30 minutes
                 return False, f"cooldown_active_{int((1800-elapsed)/60)}_min_remaining"
         return True, "ok"
 
@@ -77,6 +77,7 @@ def get_session():
         return None
 
 def check_any_active_position(headers):
+    """VERROU COMPTE VIDE REEL : Bloque s'il y a la moindre position ouverte, tous marchés confondus"""
     try:
         response = requests.get(f"{API_URL}/positions", headers=headers, timeout=10)
         if response.status_code == 200:
@@ -118,7 +119,7 @@ def open_position(direction, price, epic, headers):
         "epic": epic,
         "direction": side,
         "size": size,
-        "guaranteedStop": True,  
+        "guaranteedStop": True,  # Vrai booleen sans guillemets pour l'API Capital
         "stopDistance": round(stop_distance, rules["decimals"]),
         "profitDistance": round(profit_distance, rules["decimals"])
     }
@@ -156,15 +157,18 @@ def webhook():
         if not headers: 
             return jsonify({"status": "error", "message": "Authentication failed"}), 500
 
+        # 1. Verification verrou global position ouverte
         if check_any_active_position(headers):
             log.warning("Signal ignore : Une position est deja en cours sur le compte.")
             return jsonify({"status": "blocked", "reason": "account_has_open_position"})
 
+        # 2. Cooldown securite 30 minutes
         can_trade, reason = state.can_trade()
         if not can_trade:
             log.warning(f"Signal refuse : {reason}")
             return jsonify({"status": "blocked", "reason": reason})
 
+        # 3. Envoi de l'ordre
         if signal in ("long", "short"):
             success = open_position(signal, price, epic, headers)
             return jsonify({"status": "processed", "success": success})
@@ -178,6 +182,5 @@ def webhook():
 # POINT D'ENTREE ADAPTE A RAILWAY
 # ==========================================
 if __name__ == "__main__":
-    # Recupere dynamiquement le port injecte par Railway (ex: 8080)
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
