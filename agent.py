@@ -1,89 +1,103 @@
 """
-Agent Trading IA v6.1 — Architecture Complète
-Gestionnaire d'ordres sécurisé avec vérification des règles broker
+Agent Trading IA v6.4 — Structure Complète
+Architecture originale préservée + Correction dynamique des erreurs de seuils
 """
 import os
+import json
 import logging
 import requests
 import sys
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
-# Configuration des logs pour voir chaque étape dans Railway
+# --- CONFIGURATION LOGS ---
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# Paramètres
+# --- CONFIGURATION API ---
 API_KEY = os.environ.get("CAPITAL_API_KEY", "").strip()
 API_EMAIL = os.environ.get("CAPITAL_EMAIL", "").strip()
 API_PASSWORD = os.environ.get("CAPITAL_PASSWORD", "").strip()
 API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 RISK_AMOUNT = 400.0
 
+class AccountState:
+    def __init__(self):
+        self.last_trade_time = None
+
+    def can_trade(self):
+        if self.last_trade_time:
+            elapsed = (datetime.now(timezone.utc) - self.last_trade_time).total_seconds()
+            if elapsed < 1800:
+                return False, "cooldown_active"
+        return True, "ok"
+
+state = AccountState()
 app = Flask(__name__)
 
 def get_session():
-    """Initialise ou récupère la session active"""
     try:
-        res = requests.post(f"{API_URL}/session", 
+        response = requests.post(
+            f"{API_URL}/session",
             headers={"X-CAP-API-KEY": API_KEY, "Content-Type": "application/json"},
-            json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False}, timeout=10)
-        if res.status_code == 200:
-            return {"X-CAP-API-KEY": API_KEY, "CST": res.headers.get("CST"), "X-SECURITY-TOKEN": res.headers.get("X-SECURITY-TOKEN"), "Content-Type": "application/json"}
+            json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False},
+            timeout=10
+        )
+        if response.status_code == 200:
+            return {
+                "X-CAP-API-KEY": API_KEY,
+                "CST": response.headers.get("CST"),
+                "X-SECURITY-TOKEN": response.headers.get("X-SECURITY-TOKEN"),
+                "Content-Type": "application/json"
+            }
     except Exception as e:
-        log.error(f"Session Error: {e}")
+        log.error(f"Erreur session: {e}")
     return None
 
-def execute_trade(epic, direction, price, headers):
-    """Logique de pré-vol avant exécution"""
-    # 1. Récupération des règles en temps réel
-    market_url = f"{API_URL}/markets/{epic}"
-    res = requests.get(market_url, headers=headers, timeout=10)
-    if res.status_code != 200:
-        log.error(f"Impossible de récupérer les règles pour {epic}")
-        return False, "Market Data Error"
-    
-    rules = res.json().get("dealingRules", {})
-    min_stop = float(rules.get("minNormalStopOrLimitDistance", {}).get("value", 30.0))
-    min_size = float(rules.get("minDealSize", {}).get("value", 0.01))
-    
-    # 2. Calcul du risque et taille
-    # Normalisation : Le risque de 400$ divisé par la distance minimale
-    size = round(max(min_size, (RISK_AMOUNT / min_stop)), 2)
-    
-    # 3. Construction de l'ordre
-    payload = {
-        "epic": epic,
-        "direction": direction,
-        "size": size,
-        "guaranteedStop": True,
-        "stopDistance": min_stop,
-        "profitDistance": min_stop * 1.5
-    }
-    
-    # 4. Exécution
-    order_res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
-    log.info(f"ORDRE | Epic: {epic} | Size: {size} | Payload: {payload} | Res: {order_res.text}")
-    return order_res.status_code == 200, order_res.text
+def get_market_rules(epic, headers):
+    try:
+        res = requests.get(f"{API_URL}/markets/{epic}", headers=headers, timeout=10)
+        data = res.json()
+        rules = data.get("dealingRules", {})
+        return {
+            "min_stop": float(rules.get("minNormalStopOrLimitDistance", {}).get("value", 20.0)),
+            "min_size": float(rules.get("minDealSize", {}).get("value", 0.1))
+        }
+    except:
+        return {"min_stop": 30.0, "min_size": 0.1}
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "Agent v6.4 Actif"})
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True)
-        epic, signal, price = data.get("epic"), data.get("signal"), float(data.get("price"))
-        direction = "BUY" if signal == "long" else "SELL"
-        
+        epic, signal = data.get("epic"), data.get("signal")
         headers = get_session()
-        if not headers: return jsonify({"status": "error", "message": "Auth Failed"}), 500
-        
-        success, msg = execute_trade(epic, direction, price, headers)
-        return jsonify({"status": "success" if success else "failed", "details": msg})
-    except Exception as e:
-        log.error(f"Critical Webhook Error: {e}")
-        return jsonify({"status": "error"}), 500
+        if not headers: return jsonify({"status": "error"}), 500
 
-@app.route("/", methods=["GET"])
-def health():
-    return "Agent v6.1 Opérationnel", 200
+        rules = get_market_rules(epic, headers)
+        
+        # Calcul : Risque / Distance dynamique
+        size = round(max(rules["min_size"], (RISK_AMOUNT / rules["min_stop"])), 2)
+        
+        payload = {
+            "epic": epic,
+            "direction": "BUY" if signal == "long" else "SELL",
+            "size": size,
+            "guaranteedStop": True,
+            "stopDistance": rules["min_stop"]
+        }
+        
+        res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
+        log.info(f"REPONSE BROKER | EPIC: {epic} | STATUS: {res.status_code} | MSG: {res.text}")
+        
+        return jsonify({"status": "success" if res.status_code == 200 else "failed"})
+    except Exception as e:
+        log.error(f"Erreur Webhook: {e}")
+        return jsonify({"status": "error"}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
