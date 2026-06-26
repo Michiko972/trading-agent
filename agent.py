@@ -317,6 +317,47 @@ def webhook():
         res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
         log.info(f"REPONSE BROKER | EPIC: {epic} | STATUS: {res.status_code} | MSG: {res.text}")
 
+        # Retry automatique si le stop est rejeté comme trop proche
+        if res.status_code != 200:
+
+            try:
+                error_data = res.json()
+                error_code = error_data.get("errorCode", "")
+            except Exception:
+                error_code = ""
+
+            if "stoploss.minvalue" in error_code:
+
+                min_value_str = error_data.get("errorCode", "").split(":")[-1] if ":" in error_code else None
+
+                import re
+                match = re.search(r"[\d.]+", res.text)
+
+                if match:
+                    min_stop_level = float(match.group())
+
+                    if direction == "SELL":
+                        new_stop_distance = min_stop_level - price
+                    else:
+                        new_stop_distance = price - min_stop_level
+
+                    new_stop_distance = abs(new_stop_distance) * 1.02  # marge de sécurité 2%
+
+                    log.info(f"RETRY avec stop ajusté | nouvelle distance: {new_stop_distance}")
+
+                    new_profit_distance = new_stop_distance * TP_RATIO
+
+                    new_size = calculate_position_size(risk_amount, new_stop_distance, rules["min_size"], epic, price)
+
+                    payload["size"] = new_size
+                    payload["stopDistance"] = round(new_stop_distance, decimals)
+                    payload["profitDistance"] = round(new_profit_distance, decimals)
+
+                    log.info(f"Payload retry: {payload}")
+
+                    res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
+                    log.info(f"REPONSE BROKER (retry) | STATUS: {res.status_code} | MSG: {res.text}")
+
         if res.status_code == 200:
             state.position_open = True
             state.position_side = signal
