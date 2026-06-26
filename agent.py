@@ -1,6 +1,6 @@
 """
-Agent Trading IA v5.4 — Production Ready
-Gestion automatique du Risque ($400) et des Règles Broker
+Agent Trading IA v6.1 — Architecture Complète
+Gestionnaire d'ordres sécurisé avec vérification des règles broker
 """
 import os
 import logging
@@ -8,11 +8,11 @@ import requests
 import sys
 from flask import Flask, request, jsonify
 
-# --- CONFIGURATION LOGGING ---
+# Configuration des logs pour voir chaque étape dans Railway
 logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# --- CONFIGURATION VARIABLES ---
+# Paramètres
 API_KEY = os.environ.get("CAPITAL_API_KEY", "").strip()
 API_EMAIL = os.environ.get("CAPITAL_EMAIL", "").strip()
 API_PASSWORD = os.environ.get("CAPITAL_PASSWORD", "").strip()
@@ -22,65 +22,69 @@ RISK_AMOUNT = 400.0
 app = Flask(__name__)
 
 def get_session():
+    """Initialise ou récupère la session active"""
     try:
         res = requests.post(f"{API_URL}/session", 
-                            headers={"X-CAP-API-KEY": API_KEY, "Content-Type": "application/json"},
-                            json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False}, timeout=10)
+            headers={"X-CAP-API-KEY": API_KEY, "Content-Type": "application/json"},
+            json={"identifier": API_EMAIL, "password": API_PASSWORD, "encryptedPassword": False}, timeout=10)
         if res.status_code == 200:
             return {"X-CAP-API-KEY": API_KEY, "CST": res.headers.get("CST"), "X-SECURITY-TOKEN": res.headers.get("X-SECURITY-TOKEN"), "Content-Type": "application/json"}
     except Exception as e:
-        log.error(f"Auth error: {e}")
+        log.error(f"Session Error: {e}")
     return None
 
-def get_market_rules(epic, headers):
-    """Récupère les contraintes du broker pour éviter les erreurs 400/Minvalue"""
-    try:
-        res = requests.get(f"{API_URL}/markets/{epic}", headers=headers, timeout=10)
-        data = res.json()
-        rules = data.get("dealingRules", {})
-        return {
-            "min_stop": float(rules.get("minNormalStopOrLimitDistance", {}).get("value", 15.0)),
-            "min_size": float(rules.get("minDealSize", {}).get("value", 0.01))
-        }
-    except:
-        return {"min_stop": 15.0, "min_size": 0.01}
+def execute_trade(epic, direction, price, headers):
+    """Logique de pré-vol avant exécution"""
+    # 1. Récupération des règles en temps réel
+    market_url = f"{API_URL}/markets/{epic}"
+    res = requests.get(market_url, headers=headers, timeout=10)
+    if res.status_code != 200:
+        log.error(f"Impossible de récupérer les règles pour {epic}")
+        return False, "Market Data Error"
+    
+    rules = res.json().get("dealingRules", {})
+    min_stop = float(rules.get("minNormalStopOrLimitDistance", {}).get("value", 30.0))
+    min_size = float(rules.get("minDealSize", {}).get("value", 0.01))
+    
+    # 2. Calcul du risque et taille
+    # Normalisation : Le risque de 400$ divisé par la distance minimale
+    size = round(max(min_size, (RISK_AMOUNT / min_stop)), 2)
+    
+    # 3. Construction de l'ordre
+    payload = {
+        "epic": epic,
+        "direction": direction,
+        "size": size,
+        "guaranteedStop": True,
+        "stopDistance": min_stop,
+        "profitDistance": min_stop * 1.5
+    }
+    
+    # 4. Exécution
+    order_res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
+    log.info(f"ORDRE | Epic: {epic} | Size: {size} | Payload: {payload} | Res: {order_res.text}")
+    return order_res.status_code == 200, order_res.text
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True)
-        log.info(f"SIGNAL REÇU: {data}")
+        epic, signal, price = data.get("epic"), data.get("signal"), float(data.get("price"))
+        direction = "BUY" if signal == "long" else "SELL"
         
         headers = get_session()
-        if not headers: return jsonify({"status": "error", "message": "Auth failed"}), 500
+        if not headers: return jsonify({"status": "error", "message": "Auth Failed"}), 500
         
-        epic, signal = data.get("epic"), data.get("signal")
-        rules = get_market_rules(epic, headers)
-        
-        # CALCUL DE TAILLE : Risque de 400$ / distance de stop minimale
-        # Cela empêche les tailles erronées (trop grosses ou trop petites)
-        size = round(max(rules["min_size"], (RISK_AMOUNT / rules["min_stop"])), 2)
-        
-        payload = {
-            "epic": epic,
-            "direction": "BUY" if signal == "long" else "SELL",
-            "size": size,
-            "guaranteedStop": True,
-            "stopDistance": rules["min_stop"],
-            "profitDistance": rules["min_stop"] * 1.5
-        }
-        
-        res = requests.post(f"{API_URL}/positions", headers=headers, json=payload, timeout=10)
-        log.info(f"BROKER RESPONSE: {res.status_code} | Payload: {payload} | Message: {res.text}")
-        
-        return jsonify({"status": "success" if res.status_code == 200 else "failed", "res": res.text})
+        success, msg = execute_trade(epic, direction, price, headers)
+        return jsonify({"status": "success" if success else "failed", "details": msg})
     except Exception as e:
-        log.error(f"CRITICAL ERROR: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        log.error(f"Critical Webhook Error: {e}")
+        return jsonify({"status": "error"}), 500
 
 @app.route("/", methods=["GET"])
 def health():
-    return "Agent v5.4 Actif", 200
+    return "Agent v6.1 Opérationnel", 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
