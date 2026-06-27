@@ -303,13 +303,20 @@ def webhook():
 
         profit_distance = stop_distance * TP_RATIO
 
+        if direction == "BUY":
+            stop_level = price - stop_distance
+            profit_level = price + profit_distance
+        else:
+            stop_level = price + stop_distance
+            profit_level = price - profit_distance
+
         payload = {
             "epic": epic,
             "direction": direction,
             "size": size,
             "guaranteedStop": True,
-            "stopDistance": round(stop_distance, decimals),
-            "profitDistance": round(profit_distance, decimals)
+            "stopLevel": round(stop_level, decimals),
+            "profitLevel": round(profit_level, decimals)
         }
 
         log.info(f"Payload ordre: {payload} | risk_amount={risk_amount}")
@@ -326,32 +333,39 @@ def webhook():
             except Exception:
                 error_code = ""
 
-            if "stoploss.minvalue" in error_code:
-
-                min_value_str = error_data.get("errorCode", "").split(":")[-1] if ":" in error_code else None
+            if "stoploss.minvalue" in error_code or "stoploss.maxvalue" in error_code:
 
                 import re
                 match = re.search(r"[\d.]+", res.text)
 
                 if match:
-                    min_stop_level = float(match.group())
+                    limit_level = float(match.group())
 
-                    if direction == "SELL":
-                        new_stop_distance = min_stop_level - price
+                    # minvalue : le stop doit être encore plus loin du prix (au moins à ce niveau)
+                    # maxvalue : le stop ne doit pas dépasser ce niveau (trop loin)
+                    new_stop_distance = abs(limit_level - price)
+
+                    if "minvalue" in error_code:
+                        new_stop_distance *= 1.02  # marge de sécurité, on s'éloigne un peu plus
                     else:
-                        new_stop_distance = price - min_stop_level
+                        new_stop_distance *= 0.98  # marge de sécurité, on se rapproche un peu
 
-                    new_stop_distance = abs(new_stop_distance) * 1.02  # marge de sécurité 2%
-
-                    log.info(f"RETRY avec stop ajusté | nouvelle distance: {new_stop_distance}")
+                    log.info(f"RETRY ({error_code}) avec stop ajusté | nouvelle distance: {new_stop_distance}")
 
                     new_profit_distance = new_stop_distance * TP_RATIO
 
                     new_size = calculate_position_size(risk_amount, new_stop_distance, rules["min_size"], epic, price)
 
+                    if direction == "BUY":
+                        new_stop_level = price - new_stop_distance
+                        new_profit_level = price + new_profit_distance
+                    else:
+                        new_stop_level = price + new_stop_distance
+                        new_profit_level = price - new_profit_distance
+
                     payload["size"] = new_size
-                    payload["stopDistance"] = round(new_stop_distance, decimals)
-                    payload["profitDistance"] = round(new_profit_distance, decimals)
+                    payload["stopLevel"] = round(new_stop_level, decimals)
+                    payload["profitLevel"] = round(new_profit_level, decimals)
 
                     log.info(f"Payload retry: {payload}")
 
