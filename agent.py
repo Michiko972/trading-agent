@@ -336,10 +336,10 @@ def webhook():
             if "stoploss.minvalue" in error_code or "stoploss.maxvalue" in error_code:
 
                 import re
-                match = re.search(r"[\d.]+", res.text)
+                match = re.search(r":\s*(\d+\.?\d*)", res.text)
 
                 if match:
-                    limit_level = float(match.group())
+                    limit_level = float(match.group(1))
 
                     # minvalue : le stop doit être encore plus loin du prix (au moins à ce niveau)
                     # maxvalue : le stop ne doit pas dépasser ce niveau (trop loin)
