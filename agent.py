@@ -232,6 +232,11 @@ def status():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
+        # --- MODIFICATION 1 : SÉCURISATION FORMAT JSON ---
+        if not request.is_json:
+            log.error("Erreur Webhook: Requête non JSON")
+            return jsonify({"status": "error", "message": "not_json"}), 400
+        
         data = request.get_json(force=True)
         log.info(f"Signal reçu: {json.dumps(data)}")
 
@@ -341,14 +346,12 @@ def webhook():
                 if match:
                     limit_level = float(match.group(1))
 
-                    # minvalue : le stop doit être encore plus loin du prix (au moins à ce niveau)
-                    # maxvalue : le stop ne doit pas dépasser ce niveau (trop loin)
+                    # --- MODIFICATION 2 : MARGE DE SÉCURITÉ AU RETRY ---
                     new_stop_distance = abs(limit_level - price)
-
                     if "minvalue" in error_code:
-                        new_stop_distance *= 1.02  # marge de sécurité, on s'éloigne un peu plus
+                        new_stop_distance *= 1.05  # Marge 5%
                     else:
-                        new_stop_distance *= 0.98  # marge de sécurité, on se rapproche un peu
+                        new_stop_distance *= 0.95  # Marge 5%
 
                     log.info(f"RETRY ({error_code}) avec stop ajusté | nouvelle distance: {new_stop_distance}")
 
