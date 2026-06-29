@@ -22,7 +22,7 @@ API_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 
 # --- CONFIGURATION CAPITAL / RISQUE (règles Topstep 50K) ---
 CAPITAL_START = 50000.0
-RISK_PCT = 0.005          # 0.5% du capital par trade = 250€ sur 50000€
+RISK_PCT = 0.005         # 0.5% du capital par trade = 250€ sur 50000€
 DAILY_LOSS_LIMIT = 1000.0  # Perte journalière max autorisée
 MAX_DRAWDOWN = 2000.0      # Perte totale max autorisée (trailing)
 PROFIT_TARGET = 3000.0     # Objectif de profit pour réussir le Combine
@@ -181,20 +181,20 @@ def calculate_stop_distance(price, epic, min_stop_raw):
 
 def calculate_position_size(risk_amount, stop_distance, min_size, epic, price):
     """Calcule la taille de position pour respecter le montant de risque visé.
-    Distinction forex (valeur de pip spécifique) vs crypto/indices (risque direct)."""
+    Correction : distinction Forex pour éviter les tailles disproportionnées."""
 
     if stop_distance <= 0:
         return min_size
 
-    is_forex = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) \
-               and "BTC" not in epic and "ETH" not in epic
+    # Correction : On définit explicitement les actifs Forex
+    is_forex = any(c in epic for c in ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD"]) and "BTC" not in epic
 
     if is_forex:
-        pip_size = 0.01 if "JPY" in epic else 0.0001
-        stop_pips = stop_distance / pip_size
-        # Valeur d'un pip pour 100 000 unités ≈ 10 (devise de cotation)
-        size = (risk_amount / stop_pips) * (100000 / 10)
+        # Sur le Forex, 1 lot = 100 000 unités. On ajuste la taille pour éviter 100.0 lots.
+        # En divisant par 100, on ramène le calcul de lots à une échelle viable.
+        size = (risk_amount / stop_distance) / 100 
     else:
+        # Logique originale pour les autres marchés
         size = risk_amount / stop_distance
 
     size = round(size, 4)
